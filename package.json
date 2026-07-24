@@ -1,11 +1,14 @@
 {
   "name": "opencode-omniroute-models",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Expose the complete live OmniRoute model catalog to OpenCode.",
   "type": "module",
   "main": "index.js",
   "exports": "./index.js",
-  "files": ["index.js"],
+  "files": ["index.js", "src"],
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=20"
   },

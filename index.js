@@ -3,6 +3,7 @@ const OMNIROUTE_PROVIDER_ID = "omniroute"
 import { readdir, readFile } from "fs/promises"
 import { homedir } from "os"
 import { join } from "path"
+import { createCatalogFetcher, isForbiddenSelector, mergeCatalogModels } from "./src/catalog.js"
 
 const EFFORT_KEYS = new Set(["low", "medium", "high", "xhigh"])
 
@@ -15,93 +16,22 @@ const PREFIX_ALIAS = {
   if: "qoder",
 }
 
-const KEEP_PREFIXES = new Set([
-  "codex",
-  "claude",
-  "ghm",
-  "tllm",
-  "glm",
-  "ddgw",
-  "oc",
-  "ds",
-  "mcode",
-  "pepper",
-  "veo-free",
-  "opencode",
-  "opencode-go",
-])
+const CATALOG_TTL_MS = Number(process.env.OPENCODE_OMNIROUTE_MODEL_TTL_MS) || 300_000
+let catalogFetcherKey = null
+let catalogFetcher = null
 
-/**
- * Auto-routing catalog (16 templates) — virtual combos that the omniroute
- * server resolves dynamically from connected providers. The server does NOT
- * list these in /v1/models, so we inject synthetic entries here so opencode
- * users can pick any of them as a model.
- *
- * Source of truth: apps/omniroute/src/domain/assessment/types.ts::AUTO_COMBO_TEMPLATES
- */
-const AUTO_TEMPLATES = [
-  { id: "auto/best-coding",        name: "Best Coding",      reasoning: true,  vision: false },
-  { id: "auto/best-reasoning",     name: "Best Reasoning",   reasoning: true,  vision: false },
-  { id: "auto/best-fast",          name: "Best Fast",        reasoning: false, vision: false },
-  { id: "auto/best-vision",        name: "Best Vision",      reasoning: false, vision: true  },
-  { id: "auto/best-chat",          name: "Best Chat",        reasoning: false, vision: false },
-  { id: "auto/best-coding-fast",   name: "Best Coding Fast", reasoning: false, vision: false },
-  { id: "auto/pro-coding",         name: "Pro Coding",       reasoning: true,  vision: false },
-  { id: "auto/pro-reasoning",      name: "Pro Reasoning",    reasoning: true,  vision: false },
-  { id: "auto/pro-vision",         name: "Pro Vision",       reasoning: false, vision: true  },
-  { id: "auto/pro-chat",           name: "Pro Chat",         reasoning: false, vision: false },
-  { id: "auto/pro-fast",           name: "Pro Fast",         reasoning: false, vision: false },
-  { id: "auto/coding",             name: "Coding",           reasoning: true,  vision: false },
-  { id: "auto/fast",               name: "Fast",             reasoning: false, vision: false },
-  { id: "auto/chat",               name: "Chat",             reasoning: false, vision: false },
-  { id: "auto/claude-opus",        name: "Claude Opus",      reasoning: true,  vision: false },
-  { id: "auto/claude-sonnet",      name: "Claude Sonnet",    reasoning: true,  vision: false },
-]
-
-function buildAutoModel(template) {
-  const capabilities = {
-    tool_calling: true,
-    temperature: true,
-    structured_output: true,
-    attachment: false,
+function fetchLiveCatalog(baseURL, apiKey) {
+  const key = `${baseURL}\u0000${apiKey || ""}`
+  if (catalogFetcherKey !== key) {
+    catalogFetcherKey = key
+    catalogFetcher = createCatalogFetcher({ baseURL, apiKey, ttlMs: CATALOG_TTL_MS })
   }
-  if (template.reasoning) {
-    capabilities.reasoning = true
-    capabilities.thinking = true
-  }
-  if (template.vision) {
-    capabilities.vision = true
-  }
-  return {
-    id: template.id,
-    name: template.name,
-    object: "model",
-    owned_by: "combo",
-    permission: [],
-    root: template.id,
-    parent: null,
-    context_length: 200000,
-    max_input_tokens: 200000,
-    max_output_tokens: 32000,
-    input_modalities: template.vision ? ["text", "image"] : ["text"],
-    output_modalities: ["text"],
-    capabilities,
-  }
+  return catalogFetcher()
 }
 
-function injectAutoModels(models) {
-  return Object.fromEntries(Object.entries(models).filter(([id]) => !id.startsWith("auto/")))
-}
-
-function injectCatalogComboModels(models, catalogModels) {
-  const result = { ...models }
-  for (const model of catalogModels) {
-    if (!model || typeof model.id !== "string" || model.id.length === 0) continue
-    if (model.owned_by !== "combo") continue
-    if (result[model.id]) continue
-    result[model.id] = toOpenCodeCatalogModel(model)
-  }
-  return injectConfiguredComboModels(result)
+function mergeLiveCatalogModels(models, catalogModels) {
+  const normalized = catalogModels.map(toOpenCodeCatalogModel)
+  return injectConfiguredComboModels(mergeCatalogModels(models, normalized))
 }
 
 function injectConfiguredComboModels(models) {
@@ -129,7 +59,7 @@ function toOpenCodeCatalogModel(model) {
     id,
     name: model.name || id,
     object: model.object || "model",
-    owned_by: "combo",
+    owned_by: model.owned_by || "omniroute",
     permission: Array.isArray(model.permission) ? model.permission : [],
     root: model.root || id,
     parent: model.parent ?? null,
@@ -148,7 +78,6 @@ function toOpenCodeCatalogModel(model) {
 }
 
 let effortBasesCache = null
-let catalogModelsCache = null
 const configuredComboModelIds = new Set()
 
 export default async (input, options) => {
@@ -167,10 +96,10 @@ export default async (input, options) => {
         if (provider.models) {
           const baseURL = getBaseURL(provider.options)
           const apiKey = await readAuthKey(OMNIROUTE_PROVIDER_ID)
-          const catalogModels = await fetchCatalogModels(baseURL, apiKey)
+          const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
           const eb = await fetchEffortBases(baseURL, apiKey)
           provider.models = processModels(
-            injectCatalogComboModels(injectAutoModels(provider.models), catalogModels),
+            mergeLiveCatalogModels(provider.models, catalogModels),
             eb
           )
         }
@@ -185,9 +114,9 @@ export default async (input, options) => {
         const apiKey = ctx?.auth?.type === "api" && ctx.auth.key
           ? ctx.auth.key.trim()
           : await readAuthKey(OMNIROUTE_PROVIDER_ID)
-        const catalogModels = await fetchCatalogModels(baseURL, apiKey)
+        const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
         const eb = await fetchEffortBases(baseURL, apiKey)
-        return processModels(injectCatalogComboModels(injectAutoModels(baseModels), catalogModels), eb)
+        return processModels(mergeLiveCatalogModels(baseModels, catalogModels), eb)
       },
     },
   }
@@ -221,21 +150,7 @@ function processModels(models, effortBases) {
 }
 
 function filterModels(entries) {
-  return entries.filter(([id, model]) => {
-    if (id.startsWith("auto/")) return false
-    if (model?.owned_by === "combo") return true
-    if (!id.includes("/")) return true
-
-    const prefix = id.split("/")[0]
-
-    if (KEEP_PREFIXES.has(prefix)) return true
-
-    if (prefix === "openrouter") {
-      return id.includes(":free")
-    }
-
-    return false
-  })
+  return entries.filter(([id]) => !isForbiddenSelector(id))
 }
 
 function enhanceModel(model, effortBases) {
@@ -303,26 +218,7 @@ function positiveNumber(...values) {
   return undefined
 }
 
-async function fetchCatalogModels(baseURL, apiKey) {
-  if (catalogModelsCache) return catalogModelsCache
-  try {
-    const resp = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-    })
-    if (!resp.ok) return []
-    const data = await resp.json()
-    const models = Array.isArray(data?.data)
-      ? data.data.filter((model) => model && typeof model.id === "string")
-      : []
-    catalogModelsCache = models
-    return models
-  } catch {
-    return []
-  }
-}
-
 async function fetchEffortBases(baseURL, apiKey) {
-  if (effortBasesCache) return effortBasesCache
   try {
     const resp = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
