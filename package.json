@@ -1,0 +1,16 @@
+{
+  "name": "opencode-omniroute-models",
+  "version": "0.1.0",
+  "description": "Expose the complete live OmniRoute model catalog to OpenCode.",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "files": ["index.js"],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "opencode-omniroute-auth": "^1.2.2"
+  },
+  "license": "MIT"
+}
