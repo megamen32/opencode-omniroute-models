@@ -3,7 +3,14 @@ const OMNIROUTE_PROVIDER_ID = "omniroute"
 import { readdir, readFile } from "fs/promises"
 import { homedir } from "os"
 import { join } from "path"
-import { createCatalogFetcher, isForbiddenSelector, mergeCatalogModels } from "./src/catalog.js"
+import {
+  createCatalogFetcher,
+  isForbiddenSelector,
+  mergeCatalogModels,
+  normalizeCatalogModel,
+  resolveSelectorOptions,
+  toOpenCodeModelMetadata,
+} from "./src/catalog.js"
 
 const EFFORT_KEYS = new Set(["low", "medium", "high", "xhigh"])
 
@@ -29,15 +36,15 @@ function fetchLiveCatalog(baseURL, apiKey) {
   return catalogFetcher()
 }
 
-function mergeLiveCatalogModels(models, catalogModels) {
+function mergeLiveCatalogModels(models, catalogModels, selectorOptions) {
   const normalized = catalogModels.map(toOpenCodeCatalogModel)
-  return injectConfiguredComboModels(mergeCatalogModels(models, normalized))
+  return injectConfiguredComboModels(mergeCatalogModels(models, normalized, selectorOptions), selectorOptions)
 }
 
-function injectConfiguredComboModels(models) {
+function injectConfiguredComboModels(models, selectorOptions = {}) {
   const result = { ...models }
   for (const id of configuredComboModelIds) {
-    if (!result[id]) {
+    if (!result[id] && !isForbiddenSelector(id, selectorOptions)) {
       result[id] = toOpenCodeCatalogModel({ id, name: id, owned_by: "combo" })
     }
   }
@@ -45,19 +52,20 @@ function injectConfiguredComboModels(models) {
 }
 
 function toOpenCodeCatalogModel(model) {
+  const normalized = normalizeCatalogModel(model)
+  const metadata = toOpenCodeModelMetadata(normalized)
   const id = model.id
   const context = positiveNumber(
-    model.context_length,
-    model.contextWindow,
-    model.max_input_tokens,
-    model.limit?.context,
-    200000
+    normalized.context_length,
+    normalized.contextWindow,
+    normalized.max_input_tokens,
+    normalized.limit?.context,
   )
-  const output = positiveNumber(model.max_output_tokens, model.maxTokens, model.limit?.output, 32000)
+  const output = positiveNumber(normalized.max_output_tokens, normalized.maxTokens, normalized.limit?.output)
   return {
-    ...model,
+    ...normalized,
     id,
-    name: model.name || id,
+    name: id,
     object: model.object || "model",
     owned_by: model.owned_by || "omniroute",
     permission: Array.isArray(model.permission) ? model.permission : [],
@@ -66,8 +74,10 @@ function toOpenCodeCatalogModel(model) {
     context_length: context,
     max_input_tokens: positiveNumber(model.max_input_tokens, model.limit?.input, context),
     max_output_tokens: output,
-    input_modalities: Array.isArray(model.input_modalities) ? model.input_modalities : ["text"],
-    output_modalities: Array.isArray(model.output_modalities) ? model.output_modalities : ["text"],
+    limit: metadata.limit,
+    input_modalities: normalized.input_modalities,
+    output_modalities: normalized.output_modalities,
+    modalities: metadata.modalities,
     capabilities: {
       tool_calling: true,
       temperature: true,
@@ -82,6 +92,10 @@ const configuredComboModelIds = new Set()
 
 export default async (input, options) => {
   const base = await basePlugin(input, options)
+  const pluginSelectorOptions = resolveSelectorOptions({}, options, {
+    includeAuto: process.env.OPENCODE_OMNIROUTE_INCLUDE_AUTO,
+    includeBest: process.env.OPENCODE_OMNIROUTE_INCLUDE_BEST,
+  })
 
   return {
     ...base,
@@ -98,9 +112,11 @@ export default async (input, options) => {
           const apiKey = await readAuthKey(OMNIROUTE_PROVIDER_ID)
           const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
           const eb = await fetchEffortBases(baseURL, apiKey)
+          const selectorOptions = resolveSelectorOptions(provider.options, pluginSelectorOptions)
           provider.models = processModels(
-            mergeLiveCatalogModels(provider.models, catalogModels),
-            eb
+            mergeLiveCatalogModels(provider.models, catalogModels, selectorOptions),
+            eb,
+            selectorOptions
           )
         }
       }
@@ -116,7 +132,8 @@ export default async (input, options) => {
           : await readAuthKey(OMNIROUTE_PROVIDER_ID)
         const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
         const eb = await fetchEffortBases(baseURL, apiKey)
-        return processModels(mergeLiveCatalogModels(baseModels, catalogModels), eb)
+        const selectorOptions = resolveSelectorOptions(providerCfg?.options, pluginSelectorOptions)
+        return processModels(mergeLiveCatalogModels(baseModels, catalogModels, selectorOptions), eb, selectorOptions)
       },
     },
   }
@@ -139,25 +156,25 @@ function rememberConfiguredComboModels(config) {
   }
 }
 
-function processModels(models, effortBases) {
+function processModels(models, effortBases, selectorOptions) {
   const entries = Object.entries(models)
-  const kept = filterModels(entries)
+  const kept = filterModels(entries, selectorOptions)
   const result = {}
   for (const [id, model] of kept) {
-    result[id] = enhanceModel(model, effortBases)
+    result[id] = enhanceModel(model, effortBases, id)
   }
   return result
 }
 
-function filterModels(entries) {
-  return entries.filter(([id]) => !isForbiddenSelector(id))
+function filterModels(entries, selectorOptions) {
+  return entries.filter(([id]) => !isForbiddenSelector(id, selectorOptions))
 }
 
-function enhanceModel(model, effortBases) {
+function enhanceModel(model, effortBases, selectedId) {
   const id = model.id
   const result = { ...model }
 
-  result.name = prefixName(id, model.name || id)
+  result.name = selectedId
 
   if (!result.cost) {
     const input = Number(model.input_price)
@@ -194,20 +211,6 @@ function enhanceModel(model, effortBases) {
   }
 
   return result
-}
-
-function prefixName(id, name) {
-  if (id.includes("/")) {
-    const prefix = id.split("/")[0]
-    if (!name.toLowerCase().startsWith(prefix.toLowerCase())) {
-      return `${prefix} ${name}`
-    }
-  } else {
-    if (!name.toLowerCase().startsWith("combo")) {
-      return `combo ${name}`
-    }
-  }
-  return name
 }
 
 function positiveNumber(...values) {
