@@ -6,7 +6,7 @@
 
 ## CORE
 
-- `todo-overlay-kit-20260728.md` — upstream-safe OpenCode/OpenChamber overlay kit.
+- `work-overlay-kit-20260728.md` — upstream-safe OpenCode/OpenChamber overlay kit.
 
 ## BEST_EFFORT
 
