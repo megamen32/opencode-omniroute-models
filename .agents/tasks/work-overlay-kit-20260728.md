@@ -28,9 +28,11 @@ Harness: Codex desktop
 
 Session: current task
 
-Next action: Establish the update boundary and collect two independent bounded architecture reports before selecting the MVP.
+Next action: Review the completed MVP kit, then migrate the active services from source-fork execution to managed artifacts only after a clean upstream update passes the verify gate.
 
 ## Notes
 
 - The platform exposes `gpt-5.4` but not an exact `gpt-5.4-mini` or `minimax/MiniMax-M3` subagent model. Delegated architecture work therefore uses explicit `gpt-5.4` with low reasoning; MiniMax-M3 remains a runtime/provider target, never an implied model substitution.
 - Upstream worktrees currently contain unrelated untracked artifacts. They are outside this task's write scope.
+- Architecture reports converge on the balanced MVP: plugin-first OpenCode features, declared OpenChamber overlays, and immutable deployment artifacts selected by systemd.
+- Patch-series verification passed in clean temporary clones for OpenCode and OpenChamber.
