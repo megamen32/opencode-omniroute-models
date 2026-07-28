@@ -36,3 +36,4 @@ Next action: Review the completed MVP kit, then migrate the active services from
 - Upstream worktrees currently contain unrelated untracked artifacts. They are outside this task's write scope.
 - Architecture reports converge on the balanced MVP: plugin-first OpenCode features, declared OpenChamber overlays, and immutable deployment artifacts selected by systemd.
 - Patch-series verification passed in clean temporary clones for OpenCode and OpenChamber.
+- Latest upstream discovery: OpenCode `v1.18.9` and OpenChamber `v1.17.0` (both 2026-07-28); the OpenCode series applies cleanly to v1.18.9. The OpenChamber series conflicts at composer integration and is being ported in a separate Luna worktree before any deployment decision.
