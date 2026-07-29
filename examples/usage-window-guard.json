@@ -5,18 +5,11 @@
     "dryRun": true,
     "policies": [
       {
-        "connectionId": "replace-with-zai-connection-id",
-        "modelPrefixes": ["zai/"],
+        "connectionId": "replace-with-glm-connection-id",
+        "modelPrefixes": ["glm/glm-5.2", "glm/glm-5-turbo"],
         "restoreMode": "manual",
         "timezone": "Europe/Moscow",
-        "windows": [{ "days": ["mon", "tue", "wed", "thu", "fri"], "start": "18:00", "end": "23:59" }]
-      },
-      {
-        "connectionId": "replace-with-qoder-connection-id",
-        "modelPrefixes": ["qoder/"],
-        "restoreMode": "manual",
-        "timezone": "UTC",
-        "windows": [{ "days": ["mon", "tue", "wed", "thu", "fri"], "start": "00:00", "end": "14:00" }]
+        "windows": [{ "start": "09:00", "end": "13:00" }]
       }
     ]
   }

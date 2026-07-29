@@ -123,12 +123,20 @@ configure a separate safe fallback model. The scheduled controller is the only
 component that changes account state, and it leaves accounts unchanged if
 management authentication or the API update is unavailable.
 
-For Z.ai, set pause windows to the Coding Plan's high-usage/paid-overage period
-that applies to your account. For Qoder, use the UTC rate window you choose to
-avoid (for example, the lower-rate period can be the inverse of a pause window).
-Neither provider currently offers a public subscription-usage REST endpoint, so
-the guard intentionally relies on explicit time policy and OmniRoute's local
-account state rather than unreliable account-site automation.
+For Z.ai GLM Coding Plan, the verified peak period is **14:00–18:00 UTC+8**:
+that is **09:00–13:00 Europe/Moscow**. GLM-5.2 and GLM-5-Turbo cost 3x quota
+there, so the example blocks only `glm/glm-5.2` and `glm/glm-5-turbo` during
+that window. Check the current [Z.ai FAQ](https://docs.z.ai/devpack/faq) before
+changing a production schedule.
+
+Qoder's current public pricing is credits-per-billing-cycle, not a provider-wide
+time multiplier; exhausted premium credits fall back to a basic model rather
+than automatically purchasing more. Do not add a made-up Qoder time window.
+Use Qoder's [Usage page](https://docs.qoder.com/account/pricing) and add a
+threshold-based policy only when OmniRoute has an authoritative quota signal.
+Neither provider exposes a public subscription-usage REST API, so this guard
+intentionally relies on explicit time policy and OmniRoute's local account
+state rather than unreliable account-site automation.
 
 ## Development
 
