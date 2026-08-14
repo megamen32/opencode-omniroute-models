@@ -11,6 +11,11 @@ import {
   resolveSelectorOptions,
   toOpenCodeModelMetadata,
 } from "./src/catalog.js"
+import {
+  evaluateUsageWindowGuard,
+  filterGuardedModels,
+  resolveUsageWindowGuardOptions,
+} from "./src/usageWindowGuard.js"
 
 const EFFORT_KEYS = new Set(["low", "medium", "high", "xhigh"])
 
@@ -96,6 +101,7 @@ export default async (input, options) => {
     includeAuto: process.env.OPENCODE_OMNIROUTE_INCLUDE_AUTO,
     includeBest: process.env.OPENCODE_OMNIROUTE_INCLUDE_BEST,
   })
+  const pluginUsageGuardOptions = resolveUsageWindowGuardOptions({}, options)
 
   return {
     ...base,
@@ -113,10 +119,12 @@ export default async (input, options) => {
           const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
           const eb = await fetchEffortBases(baseURL, apiKey)
           const selectorOptions = resolveSelectorOptions(provider.options, pluginSelectorOptions)
+          const guardEvaluation = synchronizeUsageGuard(provider.options, pluginUsageGuardOptions)
           provider.models = processModels(
             mergeLiveCatalogModels(provider.models, catalogModels, selectorOptions),
             eb,
-            selectorOptions
+            selectorOptions,
+            guardEvaluation,
           )
         }
       }
@@ -133,7 +141,8 @@ export default async (input, options) => {
         const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
         const eb = await fetchEffortBases(baseURL, apiKey)
         const selectorOptions = resolveSelectorOptions(providerCfg?.options, pluginSelectorOptions)
-        return processModels(mergeLiveCatalogModels(baseModels, catalogModels, selectorOptions), eb, selectorOptions)
+        const guardEvaluation = synchronizeUsageGuard(providerCfg?.options, pluginUsageGuardOptions)
+        return processModels(mergeLiveCatalogModels(baseModels, catalogModels, selectorOptions), eb, selectorOptions, guardEvaluation)
       },
     },
   }
@@ -156,14 +165,20 @@ function rememberConfiguredComboModels(config) {
   }
 }
 
-function processModels(models, effortBases, selectorOptions) {
-  const entries = Object.entries(models)
+function processModels(models, effortBases, selectorOptions, guardEvaluation) {
+  const entries = Object.entries(filterGuardedModels(models, guardEvaluation))
   const kept = filterModels(entries, selectorOptions)
   const result = {}
   for (const [id, model] of kept) {
     result[id] = enhanceModel(model, effortBases, id)
   }
   return result
+}
+
+function synchronizeUsageGuard(providerOptions, pluginOptions) {
+  const guard = resolveUsageWindowGuardOptions(providerOptions, pluginOptions)
+  if (!guard.enabled) return undefined
+  return evaluateUsageWindowGuard(guard)
 }
 
 function filterModels(entries, selectorOptions) {
