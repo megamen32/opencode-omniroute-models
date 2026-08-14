@@ -7,6 +7,31 @@ It refreshes the catalog every five minutes by default, keeps model metadata
 usable by OpenCode, and hides `auto/*` and `best/*` routing selectors by
 default. It does not replace or hard-code the OmniRoute model list.
 
+## Roomhacker custom features
+
+- **Exact live IDs:** the catalog keeps provider/model IDs as selectable IDs,
+  uses the full `opencode/<model>` spelling when both short and full aliases
+  exist, and does not replace IDs with labels containing spaces.
+- **Configured MiniMax alias:** `minimax/MiniMax-M3:512k` is exposed as an
+  OpenCode model ID while routing the canonical `minimax/MiniMax-M3` upstream
+  and advertising a 512,000-token input/context limit.
+- **Selector switches:** `auto/*` and `best/*` are hidden by default and can
+  be enabled with plugin options, provider options, or environment variables.
+- **Actual combo-model telemetry:** provider responses are correlated to the
+  OpenCode session through `X-OmniRoute-Session-ID`; when the route provides
+  `X-OmniRoute-Model`, its actual model is captured and exposed at the
+  loopback endpoint `http://127.0.0.1:20129/latest` for UI overlays.
+- **OpenChamber targeted runtime patch:**
+  `scripts/patch-openchamber-runtime.mjs --apply` replaces the bundled
+  humanized model formatter with exact ID display, refusing to patch when the
+  expected runtime helper is not found. It creates a backup before changing
+  the asset.
+
+Implementation: [`src/catalog.js`](src/catalog.js),
+[`src/routeTelemetry.js`](src/routeTelemetry.js),
+[`runtime/openchamber-actual-model.js`](runtime/openchamber-actual-model.js), and
+[`scripts/patch-openchamber-runtime.mjs`](scripts/patch-openchamber-runtime.mjs).
+
 When OmniRoute returns both `oc/<model>` and `opencode/<model>`, the plugin
 keeps the full `opencode/<model>` spelling and removes the duplicate short
 alias.

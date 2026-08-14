@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.js",
   "exports": "./index.js",
-  "files": ["index.js", "src"],
+  "files": ["index.js", "src", "runtime", "scripts"],
   "scripts": {
     "test": "node --test"
   },

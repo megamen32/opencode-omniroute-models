@@ -11,6 +11,7 @@ import {
   resolveSelectorOptions,
   toOpenCodeModelMetadata,
 } from "./src/catalog.js"
+import { disposeRouteTelemetry, installRouteTelemetry, telemetryHeaders, wrapProviderFetch } from "./src/routeTelemetry.js"
 
 const EFFORT_KEYS = new Set(["low", "medium", "high", "xhigh"])
 
@@ -91,6 +92,7 @@ let effortBasesCache = null
 const configuredComboModelIds = new Set()
 
 export default async (input, options) => {
+  installRouteTelemetry()
   const base = await basePlugin(input, options)
   const pluginSelectorOptions = resolveSelectorOptions({}, options, {
     includeAuto: process.env.OPENCODE_OMNIROUTE_INCLUDE_AUTO,
@@ -99,6 +101,23 @@ export default async (input, options) => {
 
   return {
     ...base,
+    auth: {
+      ...base.auth,
+      loader: async (...loaderArgs) => {
+        const loaded = await base.auth?.loader?.(...loaderArgs)
+        return loaded && typeof loaded === "object"
+          ? { ...loaded, fetch: wrapProviderFetch(loaded.fetch) }
+          : loaded
+      },
+    },
+    "chat.headers": async (hookInput, output) => {
+      await base["chat.headers"]?.(hookInput, output)
+      Object.assign(output.headers, telemetryHeaders(hookInput.sessionID))
+    },
+    dispose: async () => {
+      await base.dispose?.()
+      disposeRouteTelemetry()
+    },
     config: async (config) => {
       await base.config?.(config)
 
@@ -106,7 +125,6 @@ export default async (input, options) => {
 
       const provider = config.provider?.[OMNIROUTE_PROVIDER_ID]
       if (provider) {
-        provider.api = undefined
         if (provider.models) {
           const baseURL = getBaseURL(provider.options)
           const apiKey = await readAuthKey(OMNIROUTE_PROVIDER_ID)
@@ -123,6 +141,7 @@ export default async (input, options) => {
     },
     provider: {
       ...base.provider,
+      fetch: wrapProviderFetch(base.provider?.fetch),
       id: OMNIROUTE_PROVIDER_ID,
       models: async (providerCfg, ctx) => {
         const baseModels = await base.provider.models(providerCfg, ctx)
