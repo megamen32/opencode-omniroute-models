@@ -1,0 +1,370 @@
+From 403975e26ac4483732d7a677e22a078d8fd782e1 Mon Sep 17 00:00:00 2001
+From: roomhacker <roomhacker@bezrabotnyi.com>
+Date: Mon, 27 Jul 2026 19:06:11 +0300
+Subject: [PATCH] test: isolate resilient chat integration tests
+
+---
+ .../2026-07-27-resilient-chat-controls.md     |   1 -
+ .../session/SubagentWorkspaceStrip.tsx        | 113 ++----------------
+ .../__tests__/SubagentWorkspaceStrip.test.tsx |  42 +++----
+ .../session/subagentWorkspaceLogic.ts         |  64 ++++++++++
+ .../src/lib/opencode/tool-call-client.test.ts |   2 +
+ .../stores/useResilienceSettingsStore.test.ts |   6 +-
+ .../src/sync/session-recovery-actions.test.ts |   2 +
+ 7 files changed, 94 insertions(+), 136 deletions(-)
+ create mode 100644 packages/ui/src/components/session/subagentWorkspaceLogic.ts
+
+diff --git a/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md b/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md
+index 2ac33316..2f4a8069 100644
+--- a/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md
++++ b/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md
+@@ -150,4 +150,3 @@ The OmniRoute plugin (`/home/roomhacker/agents-projects/opencode-omniroute-model
+ ## Execution order
+ 
+ After this plan is accepted, Tasks 1–5 are dispatched in parallel only after their write sets are confirmed disjoint. Task 6 runs after the workers return because it depends on all contracts. Each worker must report changed files, focused test command/output, and unresolved concerns; the lead integrates and performs final acceptance.
+-
+diff --git a/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx b/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx
+index 4bb25937..86f952cf 100644
+--- a/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx
++++ b/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx
+@@ -5,111 +5,14 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
+ import { useAllLiveSessions, useSessionMessageRecords, useSessionStatus } from '@/sync/sync-context';
+ import { cn, formatDirectoryName } from '@/lib/utils';
+ import { Icon } from '@/components/icon/Icon';
++import { getDirectChildSessions, getWorkspaceStripScrollDelta } from './subagentWorkspaceLogic';
+ 
+-const WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP = 320;
+-
+-type WorkspaceStripScrollInput = {
+-  key?: string;
+-  deltaX?: number;
+-  deltaY?: number;
+-  shiftKey?: boolean;
+-};
+-
+-type PickAutoOpenSubagentSessionInput = {
+-  autoOpenSubagents: boolean;
+-  activeSessionId: string | null;
+-  directChildSessions: Session[];
+-  knownChildSessionIds: Set<string>;
+-};
+-
+-const getSessionUpdatedAt = (session: Session): number => {
+-  const updatedAt = session.time?.updated;
+-  if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) {
+-    return updatedAt;
+-  }
+-
+-  const createdAt = session.time?.created;
+-  return typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0;
+-};
+-
+-const compareSessionsByRecency = (left: Session, right: Session): number => {
+-  const delta = getSessionUpdatedAt(right) - getSessionUpdatedAt(left);
+-  if (delta !== 0) {
+-    return delta;
+-  }
+-  return left.id.localeCompare(right.id);
+-};
+-
+-const getDirectChildSessions = (sessions: Session[], parentSessionId: string | null): Session[] => {
+-  if (!parentSessionId) {
+-    return [];
+-  }
+-
+-  return sessions
+-    .filter((session) => (session as Session & { parentID?: string | null }).parentID === parentSessionId)
+-    .sort(compareSessionsByRecency);
+-};
+-
+-/**
+- * Retains only child ids that still exist in the current direct-child snapshot.
+- */
+-export const reconcileKnownChildSessionIds = (
+-  knownChildSessionIds: Iterable<string>,
+-  directChildSessions: Session[],
+-): Set<string> => {
+-  const liveIds = new Set(directChildSessions.map((session) => session.id));
+-  const next = new Set<string>();
+-  for (const sessionId of knownChildSessionIds) {
+-    if (liveIds.has(sessionId)) {
+-      next.add(sessionId);
+-    }
+-  }
+-  return next;
+-};
+-
+-/**
+- * Chooses the newest unseen direct child session when subagent auto-open is enabled.
+- */
+-export const pickAutoOpenSubagentSession = ({
+-  autoOpenSubagents,
+-  activeSessionId,
+-  directChildSessions,
+-  knownChildSessionIds,
+-}: PickAutoOpenSubagentSessionInput): Session | null => {
+-  if (!autoOpenSubagents || !activeSessionId) {
+-    return null;
+-  }
+-
+-  for (const session of directChildSessions) {
+-    if (!knownChildSessionIds.has(session.id)) {
+-      return session;
+-    }
+-  }
+-
+-  return null;
+-};
+-
+-/**
+- * Normalizes keyboard and wheel input into a single horizontal scroll delta.
+- */
+-export const getWorkspaceStripScrollDelta = (input: WorkspaceStripScrollInput): number | null => {
+-  if (input.key === 'ArrowRight') {
+-    return WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP;
+-  }
+-  if (input.key === 'ArrowLeft') {
+-    return -WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP;
+-  }
+-
+-  const deltaX = typeof input.deltaX === 'number' ? input.deltaX : 0;
+-  const deltaY = typeof input.deltaY === 'number' ? input.deltaY : 0;
+-  if (deltaX !== 0) {
+-    return deltaX;
+-  }
+-  if (input.shiftKey && deltaY !== 0) {
+-    return deltaY;
+-  }
+-  return null;
+-};
++export {
++  getDirectChildSessions,
++  getWorkspaceStripScrollDelta,
++  pickAutoOpenSubagentSession,
++  reconcileKnownChildSessionIds,
++} from './subagentWorkspaceLogic';
+ 
+ const getSessionDirectoryLabel = (session: Session, fallbackDirectory: string | null): string | null => {
+   const directory = (session as Session & { directory?: string | null }).directory ?? fallbackDirectory ?? null;
+@@ -287,5 +190,3 @@ export const SubagentWorkspaceStrip: React.FC<SubagentWorkspaceStripProps> = ({
+     </section>
+   );
+ };
+-
+-export { getDirectChildSessions };
+diff --git a/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx b/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx
+index af87af65..4018aaf4 100644
+--- a/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx
++++ b/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx
+@@ -1,9 +1,10 @@
+ import { describe, expect, test } from 'bun:test';
+ import type { Session } from '@opencode-ai/sdk/v2';
+-
+-const loadSubagentWorkspaceModule = async () => (
+-  import('../SubagentWorkspaceStrip').catch(() => null)
+-);
++import {
++  getWorkspaceStripScrollDelta,
++  pickAutoOpenSubagentSession,
++  reconcileKnownChildSessionIds,
++} from '../subagentWorkspaceLogic';
+ 
+ const loadSubagentWorkspaceSettingsStoreModule = async () => (
+   import('@/stores/useSubagentWorkspaceSettingsStore').catch(() => null)
+@@ -31,24 +32,20 @@ describe('useSubagentWorkspaceSettingsStore', () => {
+ });
+ 
+ describe('SubagentWorkspaceStrip helpers', () => {
+-  test('auto-opens only brand-new direct child sessions', async () => {
+-    const module = await loadSubagentWorkspaceModule();
+-
+-    expect(module).not.toBeNull();
+-
++  test('auto-opens only brand-new direct child sessions', () => {
+     const firstChildren = [
+       session('child-old', { parentID: 'parent', updated: 10 }),
+       session('child-new', { parentID: 'parent', updated: 20 }),
+     ];
+ 
+-    expect(module?.pickAutoOpenSubagentSession({
++    expect(pickAutoOpenSubagentSession({
+       autoOpenSubagents: false,
+       activeSessionId: 'parent',
+       directChildSessions: firstChildren,
+       knownChildSessionIds: new Set<string>(),
+     })?.id ?? null).toBe(null);
+ 
+-    expect(module?.pickAutoOpenSubagentSession({
++    expect(pickAutoOpenSubagentSession({
+       autoOpenSubagents: true,
+       activeSessionId: 'parent',
+       directChildSessions: firstChildren,
+@@ -56,19 +53,15 @@ describe('SubagentWorkspaceStrip helpers', () => {
+     })?.id ?? null).toBe('child-new');
+   });
+ 
+-  test('cleans up vanished child ids before detecting a re-created child', async () => {
+-    const module = await loadSubagentWorkspaceModule();
+-
+-    expect(module).not.toBeNull();
+-
+-    const knownIds = module?.reconcileKnownChildSessionIds(
++  test('cleans up vanished child ids before detecting a re-created child', () => {
++    const knownIds = reconcileKnownChildSessionIds(
+       new Set<string>(['child-a', 'child-b']),
+       [session('child-b', { parentID: 'parent', updated: 5 })],
+     );
+ 
+     expect([...((knownIds ?? new Set<string>()))]).toEqual(['child-b']);
+ 
+-    expect(module?.pickAutoOpenSubagentSession({
++    expect(pickAutoOpenSubagentSession({
+       autoOpenSubagents: true,
+       activeSessionId: 'parent',
+       directChildSessions: [
+@@ -79,13 +72,10 @@ describe('SubagentWorkspaceStrip helpers', () => {
+     })?.id ?? null).toBe('child-a');
+   });
+ 
+-  test('maps keyboard and trackpad input into horizontal strip scrolling', async () => {
+-    const module = await loadSubagentWorkspaceModule();
+-
+-    expect(module).not.toBeNull();
+-    expect(module?.getWorkspaceStripScrollDelta({ key: 'ArrowRight' }) ?? null).toBeGreaterThan(0);
+-    expect(module?.getWorkspaceStripScrollDelta({ key: 'ArrowLeft' }) ?? null).toBeLessThan(0);
+-    expect(module?.getWorkspaceStripScrollDelta({ deltaX: 48, deltaY: 5 }) ?? null).toBe(48);
+-    expect(module?.getWorkspaceStripScrollDelta({ deltaX: 0, deltaY: 36, shiftKey: true }) ?? null).toBe(36);
++  test('maps keyboard and trackpad input into horizontal strip scrolling', () => {
++    expect(getWorkspaceStripScrollDelta({ key: 'ArrowRight' }) ?? null).toBeGreaterThan(0);
++    expect(getWorkspaceStripScrollDelta({ key: 'ArrowLeft' }) ?? null).toBeLessThan(0);
++    expect(getWorkspaceStripScrollDelta({ deltaX: 48, deltaY: 5 }) ?? null).toBe(48);
++    expect(getWorkspaceStripScrollDelta({ deltaX: 0, deltaY: 36, shiftKey: true }) ?? null).toBe(36);
+   });
+ });
+diff --git a/packages/ui/src/components/session/subagentWorkspaceLogic.ts b/packages/ui/src/components/session/subagentWorkspaceLogic.ts
+new file mode 100644
+index 00000000..b0d2071d
+--- /dev/null
++++ b/packages/ui/src/components/session/subagentWorkspaceLogic.ts
+@@ -0,0 +1,64 @@
++import type { Session } from '@opencode-ai/sdk/v2';
++
++const WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP = 320;
++
++type WorkspaceStripScrollInput = {
++  key?: string;
++  deltaX?: number;
++  deltaY?: number;
++  shiftKey?: boolean;
++};
++
++type PickAutoOpenSubagentSessionInput = {
++  autoOpenSubagents: boolean;
++  activeSessionId: string | null;
++  directChildSessions: Session[];
++  knownChildSessionIds: Set<string>;
++};
++
++const getSessionUpdatedAt = (session: Session): number => {
++  const updatedAt = session.time?.updated;
++  if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) return updatedAt;
++  const createdAt = session.time?.created;
++  return typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0;
++};
++
++const compareSessionsByRecency = (left: Session, right: Session): number => {
++  const delta = getSessionUpdatedAt(right) - getSessionUpdatedAt(left);
++  return delta !== 0 ? delta : left.id.localeCompare(right.id);
++};
++
++export const getDirectChildSessions = (sessions: Session[], parentSessionId: string | null): Session[] => {
++  if (!parentSessionId) return [];
++  return sessions
++    .filter((session) => (session as Session & { parentID?: string | null }).parentID === parentSessionId)
++    .sort(compareSessionsByRecency);
++};
++
++export const reconcileKnownChildSessionIds = (
++  knownChildSessionIds: Iterable<string>,
++  directChildSessions: Session[],
++): Set<string> => {
++  const liveIds = new Set(directChildSessions.map((session) => session.id));
++  return new Set([...knownChildSessionIds].filter((sessionId) => liveIds.has(sessionId)));
++};
++
++export const pickAutoOpenSubagentSession = ({
++  autoOpenSubagents,
++  activeSessionId,
++  directChildSessions,
++  knownChildSessionIds,
++}: PickAutoOpenSubagentSessionInput): Session | null => {
++  if (!autoOpenSubagents || !activeSessionId) return null;
++  return directChildSessions.find((session) => !knownChildSessionIds.has(session.id)) ?? null;
++};
++
++export const getWorkspaceStripScrollDelta = (input: WorkspaceStripScrollInput): number | null => {
++  if (input.key === 'ArrowRight') return WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP;
++  if (input.key === 'ArrowLeft') return -WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP;
++  const deltaX = typeof input.deltaX === 'number' ? input.deltaX : 0;
++  const deltaY = typeof input.deltaY === 'number' ? input.deltaY : 0;
++  if (deltaX !== 0) return deltaX;
++  if (input.shiftKey && deltaY !== 0) return deltaY;
++  return null;
++};
+diff --git a/packages/ui/src/lib/opencode/tool-call-client.test.ts b/packages/ui/src/lib/opencode/tool-call-client.test.ts
+index 23db9873..14e66c97 100644
+--- a/packages/ui/src/lib/opencode/tool-call-client.test.ts
++++ b/packages/ui/src/lib/opencode/tool-call-client.test.ts
+@@ -33,6 +33,8 @@ mock.module('@/stores/useMcpStore', () => ({
+ 
+ mock.module('@/lib/opencode/client', () => ({
+   opencodeClient: {
++    setDirectory: mock(() => undefined),
++    getDirectory: mock(() => undefined),
+     listAgents: mock(async () => listedAgents),
+     getSession: mock(async (sessionID: string) => {
+       const session = sessionsById[sessionID];
+diff --git a/packages/ui/src/stores/useResilienceSettingsStore.test.ts b/packages/ui/src/stores/useResilienceSettingsStore.test.ts
+index 2123471e..3e8e1010 100644
+--- a/packages/ui/src/stores/useResilienceSettingsStore.test.ts
++++ b/packages/ui/src/stores/useResilienceSettingsStore.test.ts
+@@ -47,8 +47,7 @@ const deferred = <T,>() => {
+ const responseWithJson = (value: unknown): Response =>
+   new Response(JSON.stringify(value), {
+     headers: { 'Content-Type': 'application/json' },
+-  });
+-
++});
+ const ensureLocalStorage = (): void => {
+   if (typeof localStorage !== 'undefined') {
+     return;
+@@ -119,6 +118,8 @@ mock.module('@/lib/persistence', () => ({
+ 
+ mock.module('@/lib/opencode/client', () => ({
+   opencodeClient: {
++    setDirectory: mock(() => undefined),
++    getDirectory: mock(() => undefined),
+     getProvidersForConfig: mock(async (directory?: string | null) => {
+       const ids = providerModelIdsByDirectory.get(directory ?? '') ?? [];
+       return {
+@@ -342,4 +343,3 @@ describe('useResilienceSettingsStore', () => {
+     });
+   });
+ });
+-
+diff --git a/packages/ui/src/sync/session-recovery-actions.test.ts b/packages/ui/src/sync/session-recovery-actions.test.ts
+index 74f9150b..f0305b54 100644
+--- a/packages/ui/src/sync/session-recovery-actions.test.ts
++++ b/packages/ui/src/sync/session-recovery-actions.test.ts
+@@ -39,6 +39,8 @@ const selectionState = {
+ 
+ mock.module("@/lib/opencode/client", () => ({
+   opencodeClient: {
++    setDirectory: () => undefined,
++    getDirectory: () => undefined,
+     waitForSessionIdle: async (sessionId: string, directory?: string | null) => {
+       operationLog.push({ kind: "wait", sessionId, directory });
+     },
+-- 
+2.34.1
+

@@ -11,6 +11,12 @@ import {
   resolveSelectorOptions,
   toOpenCodeModelMetadata,
 } from "./src/catalog.js"
+import { disposeRouteTelemetry, installRouteTelemetry, telemetryHeaders, wrapProviderFetch } from "./src/routeTelemetry.js"
+import {
+  evaluateUsageWindowGuard,
+  filterGuardedModels,
+  resolveUsageWindowGuardOptions,
+} from "./src/usageWindowGuard.js"
 
 const EFFORT_KEYS = new Set(["low", "medium", "high", "xhigh"])
 
@@ -91,14 +97,33 @@ let effortBasesCache = null
 const configuredComboModelIds = new Set()
 
 export default async (input, options) => {
+  installRouteTelemetry()
   const base = await basePlugin(input, options)
   const pluginSelectorOptions = resolveSelectorOptions({}, options, {
     includeAuto: process.env.OPENCODE_OMNIROUTE_INCLUDE_AUTO,
     includeBest: process.env.OPENCODE_OMNIROUTE_INCLUDE_BEST,
   })
+  const pluginUsageGuardOptions = resolveUsageWindowGuardOptions({}, options)
 
   return {
     ...base,
+    auth: {
+      ...base.auth,
+      loader: async (...loaderArgs) => {
+        const loaded = await base.auth?.loader?.(...loaderArgs)
+        return loaded && typeof loaded === "object"
+          ? { ...loaded, fetch: wrapProviderFetch(loaded.fetch) }
+          : loaded
+      },
+    },
+    "chat.headers": async (hookInput, output) => {
+      await base["chat.headers"]?.(hookInput, output)
+      Object.assign(output.headers, telemetryHeaders(hookInput.sessionID))
+    },
+    dispose: async () => {
+      await base.dispose?.()
+      disposeRouteTelemetry()
+    },
     config: async (config) => {
       await base.config?.(config)
 
@@ -106,23 +131,25 @@ export default async (input, options) => {
 
       const provider = config.provider?.[OMNIROUTE_PROVIDER_ID]
       if (provider) {
-        provider.api = undefined
         if (provider.models) {
           const baseURL = getBaseURL(provider.options)
           const apiKey = await readAuthKey(OMNIROUTE_PROVIDER_ID)
           const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
           const eb = await fetchEffortBases(baseURL, apiKey)
           const selectorOptions = resolveSelectorOptions(provider.options, pluginSelectorOptions)
+          const guardEvaluation = synchronizeUsageGuard(provider.options, pluginUsageGuardOptions)
           provider.models = processModels(
             mergeLiveCatalogModels(provider.models, catalogModels, selectorOptions),
             eb,
-            selectorOptions
+            selectorOptions,
+            guardEvaluation,
           )
         }
       }
     },
     provider: {
       ...base.provider,
+      fetch: wrapProviderFetch(base.provider?.fetch),
       id: OMNIROUTE_PROVIDER_ID,
       models: async (providerCfg, ctx) => {
         const baseModels = await base.provider.models(providerCfg, ctx)
@@ -133,7 +160,8 @@ export default async (input, options) => {
         const catalogModels = await fetchLiveCatalog(baseURL, apiKey)
         const eb = await fetchEffortBases(baseURL, apiKey)
         const selectorOptions = resolveSelectorOptions(providerCfg?.options, pluginSelectorOptions)
-        return processModels(mergeLiveCatalogModels(baseModels, catalogModels, selectorOptions), eb, selectorOptions)
+        const guardEvaluation = synchronizeUsageGuard(providerCfg?.options, pluginUsageGuardOptions)
+        return processModels(mergeLiveCatalogModels(baseModels, catalogModels, selectorOptions), eb, selectorOptions, guardEvaluation)
       },
     },
   }
@@ -156,14 +184,20 @@ function rememberConfiguredComboModels(config) {
   }
 }
 
-function processModels(models, effortBases, selectorOptions) {
-  const entries = Object.entries(models)
+function processModels(models, effortBases, selectorOptions, guardEvaluation) {
+  const entries = Object.entries(filterGuardedModels(models, guardEvaluation))
   const kept = filterModels(entries, selectorOptions)
   const result = {}
   for (const [id, model] of kept) {
     result[id] = enhanceModel(model, effortBases, id)
   }
   return result
+}
+
+function synchronizeUsageGuard(providerOptions, pluginOptions) {
+  const guard = resolveUsageWindowGuardOptions(providerOptions, pluginOptions)
+  if (!guard.enabled) return undefined
+  return evaluateUsageWindowGuard(guard)
 }
 
 function filterModels(entries, selectorOptions) {

@@ -132,6 +132,15 @@ test("projects live metadata into OpenCode's limit and modality schema", () => {
   assert.deepEqual(metadata.modalities, { input: ["text", "image"], output: ["text"] })
 })
 
+test("omits invalid empty limit metadata for unknown live models", () => {
+  const metadata = toOpenCodeModelMetadata({
+    id: "vendor/unknown-live-model",
+  })
+
+  assert.equal("limit" in metadata, false)
+  assert.deepEqual(metadata.modalities, { input: [], output: [] })
+})
+
 test("refreshes the live catalog after the configured TTL", async () => {
   let requests = 0
   const server = createServer((_request, response) => {

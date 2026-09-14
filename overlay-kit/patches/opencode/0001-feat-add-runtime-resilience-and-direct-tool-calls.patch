@@ -1,0 +1,446 @@
+From 8efa08adf579947b4116901be4ba1de39e8b08d9 Mon Sep 17 00:00:00 2001
+From: roomhackerfrom100 <megamen932@gmai.com>
+Date: Mon, 27 Jul 2026 19:45:02 +0300
+Subject: [PATCH] feat: add runtime resilience and direct tool calls
+
+---
+ packages/core/src/session/execution/local.ts  | 17 +++++-
+ packages/core/src/session/message-updater.ts  |  3 +
+ packages/core/src/v1/config/config.ts         |  4 ++
+ packages/core/src/v1/config/migrate.ts        |  1 +
+ .../instance/httpapi/groups/experimental.ts   | 31 ++++++++++
+ .../instance/httpapi/handlers/experimental.ts | 20 ++++++-
+ packages/opencode/src/session/prompt.ts       | 58 +++++++++++++++++++
+ packages/protocol/src/groups/session.ts       | 15 +++++
+ packages/schema/src/session-event.ts          |  9 +--
+ packages/schema/src/session-message.ts        | 11 +++-
+ packages/server/src/handlers/session.ts       | 26 ++++++++-
+ 11 files changed, 184 insertions(+), 11 deletions(-)
+
+diff --git a/packages/core/src/session/execution/local.ts b/packages/core/src/session/execution/local.ts
+index d874c40832..42ba51e7db 100644
+--- a/packages/core/src/session/execution/local.ts
++++ b/packages/core/src/session/execution/local.ts
+@@ -6,6 +6,8 @@ import { SessionRunner } from "../runner"
+ import { SessionSchema } from "../schema"
+ import { SessionStore } from "../store"
+ import { SessionExecution } from "../execution"
++import { Config } from "../../config"
++import { ConfigResilience } from "../../config/resilience"
+ 
+ /** Current-process routing for implicit-local Locations. Future remote placement belongs here. */
+ const layer = Layer.effect(
+@@ -17,8 +19,19 @@ const layer = Layer.effect(
+       drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force) {
+         const session = yield* store.get(sessionID)
+         if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
+-        return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force })).pipe(
+-          Effect.provide(locations.get(session.location)),
++        const location = locations.get(session.location)
++        return yield* Effect.gen(function* () {
++          const first = yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force })).pipe(Effect.exit)
++          if (first._tag === "Success") return first.value
++
++          const config = yield* Config.Service
++          const resilience = ConfigResilience.fromEntries(yield* config.entries())
++          if (!resilience.autoResume) return yield* Effect.failCause(first.cause)
++
++          yield* Effect.logWarning("Auto-resuming failed Session execution", { sessionID })
++          return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force: true }))
++        }).pipe(
++          Effect.provide(location),
+           Effect.tapCause((cause) =>
+             Cause.hasInterruptsOnly(cause)
+               ? Effect.void
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+index 46118a89fe..23fbd90d3c 100644
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -199,6 +199,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
+               type: "assistant",
+               agent: event.data.agent,
+               model: event.data.model,
++              resilience: event.data.resilience,
+               time: { created: event.data.timestamp },
+               content: [],
+               snapshot: event.data.snapshot ? { start: event.data.snapshot } : undefined,
+@@ -212,6 +213,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
+           draft.finish = event.data.finish
+           draft.cost = event.data.cost
+           draft.tokens = event.data.tokens
++          if (event.data.resilience) draft.resilience = event.data.resilience
+           if (event.data.snapshot || event.data.files)
+             draft.snapshot = {
+               ...draft.snapshot,
+@@ -225,6 +227,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
+           draft.time.completed = event.data.timestamp
+           draft.finish = "error"
+           draft.error = event.data.error
++          if (event.data.resilience) draft.resilience = event.data.resilience
+         })
+       },
+       "session.next.text.started": (event) => {
+diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
+index 691f55150a..e8c8e32908 100644
+--- a/packages/core/src/v1/config/config.ts
++++ b/packages/core/src/v1/config/config.ts
+@@ -16,6 +16,7 @@ import { ConfigPluginV1 } from "./plugin"
+ import { ConfigProviderV1 } from "./provider"
+ import { ConfigServerV1 } from "./server"
+ import { ConfigSkillsV1 } from "./skills"
++import { ConfigResilience } from "../../config/resilience"
+ 
+ export type Layout = ConfigLayoutV1.Layout
+ 
+@@ -146,6 +147,9 @@ export const Info = Schema.Struct({
+     description:
+       "Thresholds for truncating tool output. When output exceeds either limit, the full text is written to the truncation directory and a preview is returned.",
+   }),
++  resilience: Schema.optional(ConfigResilience.Info).annotate({
++    description: "Provider retry, timeout, automatic resume, and ordered fallback settings.",
++  }),
+   compaction: Schema.optional(
+     Schema.Struct({
+       auto: Schema.optional(Schema.Boolean).annotate({
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+index ebe1b905ff..da531dd47a 100644
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -50,6 +50,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
+     lsp: info.lsp,
+     attachments: info.attachment,
+     tool_output: info.tool_output,
++    resilience: info.resilience,
+     mcp: mcp(info),
+     compaction: info.compaction && {
+       auto: info.compaction.auto,
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts
+index 52c714a5ae..98ddc57fad 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts
+@@ -48,12 +48,18 @@ export const ConsoleSwitchPayload = Schema.Struct({
+ })
+ 
+ const ToolIDs = Schema.Array(Schema.String).annotate({ identifier: "ToolIDs" })
++const CallableToolIDs = Schema.Array(Schema.String).annotate({ identifier: "CallableToolIDs" })
+ const ToolListItem = Schema.Struct({
+   id: Schema.String,
+   description: Schema.String,
+   parameters: Schema.Unknown,
+ }).annotate({ identifier: "ToolListItem" })
+ const ToolList = Schema.Array(ToolListItem).annotate({ identifier: "ToolList" })
++export const ToolCallPayload = Schema.Struct({
++  sessionID: SessionID,
++  tool: Schema.String,
++  arguments: Schema.Record(Schema.String, Schema.Unknown),
++})
+ export const ToolListQuery = Schema.Struct({
+   ...WorkspaceRoutingQueryFields,
+   provider: ProviderV2.ID,
+@@ -94,6 +100,8 @@ export const ExperimentalPaths = {
+   consoleSwitch: "/experimental/console/switch",
+   tool: "/experimental/tool",
+   toolIDs: "/experimental/tool/ids",
++  toolCall: "/experimental/tool/call",
++  callableToolIDs: "/experimental/tool/callable-ids",
+   worktree: "/experimental/worktree",
+   worktreeReset: "/experimental/worktree/reset",
+   session: "/experimental/session",
+@@ -173,6 +181,29 @@ export const ExperimentalApi = HttpApi.make("experimental")
+               "Get a list of all available tool IDs, including both built-in tools and dynamically registered tools.",
+           }),
+         ),
++        HttpApiEndpoint.post("toolCall", ExperimentalPaths.toolCall, {
++          query: WorkspaceRoutingQuery,
++          payload: ToolCallPayload,
++          success: Schema.Unknown,
++          error: HttpApiError.BadRequest,
++        }).annotateMerge(
++          OpenApi.annotations({
++            identifier: "tool.call",
++            summary: "Call tool",
++            description: "Execute one available Task or MCP/plugin tool with explicit JSON arguments.",
++          }),
++        ),
++        HttpApiEndpoint.get("callableToolIDs", ExperimentalPaths.callableToolIDs, {
++          query: WorkspaceRoutingQuery,
++          success: described(CallableToolIDs, "Callable Task and MCP tool IDs"),
++          error: HttpApiError.BadRequest,
++        }).annotateMerge(
++          OpenApi.annotations({
++            identifier: "tool.callableIds",
++            summary: "List callable Task and MCP tool IDs",
++            description: "List MCP and explicit send_message tool IDs safe for direct user invocation.",
++          }),
++        ),
+         HttpApiEndpoint.get("worktree", ExperimentalPaths.worktree, {
+           query: WorkspaceRoutingQuery,
+           success: described(WorktreeList, "List of worktree directories"),
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts
+index b218c6040d..e66fc206bd 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts
+@@ -7,6 +7,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { MCP } from "@/mcp"
+ import { Project } from "@/project/project"
+ import { Session } from "@/session/session"
++import { SessionPrompt } from "@/session/prompt"
+ import type { SessionID } from "@/session/schema"
+ import { ToolJsonSchema } from "@/tool/json-schema"
+ import { ToolRegistry } from "@/tool/registry"
+@@ -15,7 +16,7 @@ import { Effect, Option } from "effect"
+ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
+ import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
+ import { InstanceHttpApi } from "../api"
+-import { ConsoleSwitchPayload, SessionListQuery, ToolListQuery, WorktreeApiError } from "../groups/experimental"
++import { ConsoleSwitchPayload, SessionListQuery, ToolCallPayload, ToolListQuery, WorktreeApiError } from "../groups/experimental"
+ 
+ function mapWorktreeError<A, R>(self: Effect.Effect<A, Worktree.Error, R>) {
+   return self.pipe(
+@@ -33,6 +34,7 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
+     const registry = yield* ToolRegistry.Service
+     const worktreeSvc = yield* Worktree.Service
+     const sessions = yield* Session.Service
++    const prompt = yield* SessionPrompt.Service
+     const background = yield* BackgroundJob.Service
+     const flags = yield* RuntimeFlags.Service
+ 
+@@ -108,6 +110,20 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
+       return yield* registry.ids()
+     })
+ 
++    const callableToolIDs = Effect.fn("ExperimentalHttpApi.callableToolIDs")(function* () {
++      const mcpToolIDs = Object.keys(yield* mcp.tools())
++      const explicitToolIDs = (yield* registry.ids()).filter((id) => id.toLowerCase().includes("send_message"))
++      return [...new Set([...mcpToolIDs, ...explicitToolIDs])].sort()
++    })
++
++    const toolCall = Effect.fn("ExperimentalHttpApi.toolCall")(function* (ctx: {
++      payload: typeof ToolCallPayload.Type
++    }) {
++      return yield* prompt.callTool(ctx.payload).pipe(
++        Effect.catchCause(() => Effect.fail(new HttpApiError.BadRequest({}))),
++      )
++    })
++
+     const worktree = Effect.fn("ExperimentalHttpApi.worktree")(function* () {
+       const ctx = yield* InstanceState.context
+       return yield* project.sandboxes(ctx.project.id)
+@@ -182,6 +198,8 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
+       .handle("consoleSwitch", switchConsole)
+       .handle("tool", tool)
+       .handle("toolIDs", toolIDs)
++      .handle("callableToolIDs", callableToolIDs)
++      .handle("toolCall", toolCall)
+       .handle("worktree", worktree)
+       .handle("worktreeCreate", worktreeCreate)
+       .handle("worktreeRemove", worktreeRemove)
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index eb116f6b96..8bb1c886b4 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -106,6 +106,12 @@ export interface Interface {
+   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
+   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
++  readonly callTool: (input: {
++    sessionID: SessionID
++    tool: string
++    arguments: Record<string, unknown>
++    messageID?: MessageID
++  }) => Effect.Effect<Tool.ExecuteResult, unknown>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+@@ -190,6 +196,57 @@ const layer = Layer.effect(
+       return parts
+     })
+ 
++    const callTool = Effect.fn("SessionPrompt.callTool")(function* (input: {
++      sessionID: SessionID
++      tool: string
++      arguments: Record<string, unknown>
++      messageID?: MessageID
++    }) {
++      const session = yield* sessions.get(input.sessionID)
++      const messages = yield* sessions.messages({ sessionID: input.sessionID })
++      const assistant = messages.findLast((message) => message.info.role === "assistant")
++      if (!assistant || assistant.info.role !== "assistant") {
++        return yield* Effect.fail(new Error("Direct tool calls require an existing assistant turn"))
++      }
++
++      const agent = yield* agents.get(session.agent ?? assistant.info.agent ?? "build")
++      if (!agent) return yield* Effect.fail(new Error("The current session agent is not available"))
++      const model = yield* provider.getModel(
++        ProviderV2.ID.make(assistant.info.providerID),
++        ModelV2.ID.make(assistant.info.modelID),
++      )
++      const definitions = yield* registry.tools({
++        providerID: model.providerID,
++        modelID: ModelV2.ID.make(model.api.id),
++        agent,
++        permission: session.permission,
++      })
++      const definition = definitions.find((candidate) => candidate.id === input.tool)
++      if (!definition) return yield* Effect.fail(new Error(`Tool is not available: ${input.tool}`))
++
++      const messageID = input.messageID ?? assistant.info.id
++      const callID = `direct_${Date.now()}_${input.tool}`
++      return yield* definition.execute(input.arguments, {
++        sessionID: input.sessionID,
++        messageID,
++        agent: agent.name,
++        abort: new AbortController().signal,
++        callID,
++        extra: { bypassAgentCheck: true, promptOps: yield* ops() },
++        messages,
++        metadata: () => Effect.void,
++        ask: (request) =>
++          permission
++            .ask({
++              ...request,
++              sessionID: input.sessionID,
++              tool: { messageID, callID },
++              ruleset: Permission.merge(agent.permission, session.permission ?? []),
++            })
++            .pipe(Effect.orDie),
++      })
++    })
++
+     const title = Effect.fn("SessionPrompt.ensureTitle")(function* (input: {
+       session: Session.Info
+       history: SessionV1.WithParts[]
+@@ -1487,6 +1544,7 @@ const layer = Layer.effect(
+       shell,
+       command,
+       resolvePromptParts,
++      callTool,
+     })
+   }),
+ )
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+index 8ce85ef796..4454cdabfc 100644
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -222,6 +222,21 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
+           }),
+         ),
+     )
++    .add(
++      HttpApiEndpoint.post("session.resume", "/api/session/:sessionID/resume", {
++        params: { sessionID: Session.ID },
++        success: HttpApiSchema.NoContent,
++        error: [SessionNotFoundError, UnknownError],
++      })
++        .middleware(sessionLocationMiddleware)
++        .annotateMerge(
++          OpenApi.annotations({
++            identifier: "v2.session.resume",
++            summary: "Resume session",
++            description: "Resume the durable failed turn without admitting a duplicate user message.",
++          }),
++        ),
++    )
+     .add(
+       HttpApiEndpoint.post("session.compact", "/api/session/:sessionID/compact", {
+         params: { sessionID: Session.ID },
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+index 0f9ba3de7c..0acd773eaa 100644
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -51,12 +51,9 @@ const stepSettlementOptions = {
+ export const UnknownError = SessionMessage.UnknownError
+ export type UnknownError = SessionMessage.UnknownError
+ 
+-export const ResilienceRuntimeMetadata = Schema.Struct({
+-  attempt: NonNegativeInt,
+-  selectedModel: Schema.String,
+-  actualModel: Schema.String,
+-  fallbackUsed: Schema.Boolean,
+-}).annotate({ identifier: "session.next.resilience.runtime.metadata" })
++export const ResilienceRuntimeMetadata = SessionMessage.ResilienceRuntimeMetadata.annotate({
++  identifier: "session.next.resilience.runtime.metadata",
++})
+ export type ResilienceRuntimeMetadata = typeof ResilienceRuntimeMetadata.Type
+ 
+ export const AgentSwitched = Event.define({
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+index 58ff532063..68fb0ce1cb 100644
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -5,7 +5,7 @@ import { optional } from "./schema"
+ import { ProviderMetadata, ToolContent } from "./llm"
+ import { Model } from "./model"
+ import { FileAttachment, Prompt } from "./prompt"
+-import { DateTimeUtcFromMillis, RelativePath, statics } from "./schema"
++import { DateTimeUtcFromMillis, NonNegativeInt, RelativePath, statics } from "./schema"
+ import { SessionID } from "./session-id"
+ import { ascending } from "./identifier"
+ 
+@@ -161,12 +161,21 @@ export const AssistantContent = Schema.Union([AssistantText, AssistantReasoning,
+ )
+ export type AssistantContent = AssistantText | AssistantReasoning | AssistantTool
+ 
++export const ResilienceRuntimeMetadata = Schema.Struct({
++  attempt: NonNegativeInt,
++  selectedModel: Schema.String,
++  actualModel: Schema.String,
++  fallbackUsed: Schema.Boolean,
++}).annotate({ identifier: "Session.Message.ResilienceRuntimeMetadata" })
++export type ResilienceRuntimeMetadata = typeof ResilienceRuntimeMetadata.Type
++
+ export interface Assistant extends Schema.Schema.Type<typeof Assistant> {}
+ export const Assistant = Schema.Struct({
+   ...Base,
+   type: Schema.Literal("assistant"),
+   agent: Schema.String,
+   model: Model.Ref,
++  resilience: ResilienceRuntimeMetadata.pipe(optional),
+   content: AssistantContent.pipe(Schema.Array),
+   snapshot: Schema.Struct({
+     start: Schema.String.pipe(optional),
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+index 5b7d354b04..9a0d4e4e4a 100644
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -1,5 +1,5 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
+-import { DateTime, Effect, Stream } from "effect"
++import { Cause, DateTime, Effect, Stream } from "effect"
+ import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
+ import { Api } from "../api"
+ import { SessionsCursor } from "@opencode-ai/protocol/groups/session"
+@@ -169,6 +169,30 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
+           }
+         }),
+       )
++      .handle(
++        "session.resume",
++        Effect.fn(function* (ctx) {
++          yield* session.resume(ctx.params.sessionID).pipe(
++            Effect.catchTag(
++              "Session.NotFoundError",
++              (error) =>
++                new SessionNotFoundError({
++                  sessionID: error.sessionID,
++                  message: `Session not found: ${error.sessionID}`,
++                }),
++            ),
++            Effect.catchCause((cause) =>
++              Effect.fail(
++                new UnknownError({
++                  message: String(Cause.squash(cause)),
++                  ref: `err_${crypto.randomUUID().slice(0, 8)}`,
++                }),
++              ),
++            ),
++          )
++          return HttpApiSchema.NoContent.make()
++        }),
++      )
+       .handle(
+         "session.compact",
+         Effect.fn(function* (ctx) {
+-- 
+2.34.1
+

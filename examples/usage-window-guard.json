@@ -1,0 +1,16 @@
+{
+  "baseURL": "http://127.0.0.1:20128/v1",
+  "usageWindowGuard": {
+    "enabled": true,
+    "dryRun": true,
+    "policies": [
+      {
+        "connectionId": "replace-with-glm-connection-id",
+        "modelPrefixes": ["glm/glm-5.2", "glm/glm-5-turbo"],
+        "restoreMode": "manual",
+        "timezone": "Europe/Moscow",
+        "windows": [{ "start": "09:00", "end": "13:00" }]
+      }
+    ]
+  }
+}

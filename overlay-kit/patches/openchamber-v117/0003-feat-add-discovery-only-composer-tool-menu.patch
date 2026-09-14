@@ -1,0 +1,1079 @@
+From 9a4e80f1ca11f0138ed0db15560e2704519eba8e Mon Sep 17 00:00:00 2001
+From: roomhacker <roomhacker@bezrabotnyi.com>
+Date: Mon, 27 Jul 2026 18:50:10 +0300
+Subject: [PATCH 3/6] feat: add discovery-only composer tool menu
+
+---
+ .superpowers/sdd/task-4-report.md             | 102 +++++++++++
+ packages/ui/src/components/chat/ChatInput.tsx |   8 +
+ .../ui/src/components/chat/ChatMessage.tsx    |  29 +++
+ .../src/components/chat/ComposerToolMenu.tsx  | 138 ++++++++++++++
+ .../chat/__tests__/composerToolMenu.test.tsx  |  76 ++++++++
+ .../chat/composer/ui/ComposerFooter.tsx       |  18 ++
+ .../components/chat/message/MessageBody.tsx   |  11 +-
+ packages/ui/src/lib/opencode/client.ts        |   5 +-
+ .../src/lib/opencode/tool-call-client.test.ts | 172 ++++++++++++++++++
+ .../ui/src/lib/opencode/tool-call-client.ts   | 152 ++++++++++++++++
+ packages/ui/src/stores/useMcpStore.ts         |  31 ++++
+ packages/ui/src/sync/session-actions.ts       |  95 ++++++++++
+ 12 files changed, 833 insertions(+), 4 deletions(-)
+ create mode 100644 .superpowers/sdd/task-4-report.md
+ create mode 100644 packages/ui/src/components/chat/ComposerToolMenu.tsx
+ create mode 100644 packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx
+ create mode 100644 packages/ui/src/lib/opencode/tool-call-client.test.ts
+ create mode 100644 packages/ui/src/lib/opencode/tool-call-client.ts
+
+diff --git a/.superpowers/sdd/task-4-report.md b/.superpowers/sdd/task-4-report.md
+new file mode 100644
+index 00000000..cad5bc65
+--- /dev/null
++++ b/.superpowers/sdd/task-4-report.md
+@@ -0,0 +1,102 @@
++# Task 4 Report
++
++Date: 2026-07-27
++Repository: `/home/roomhacker/agents-projects/apps/forks/openchamber`
++Brief: `/home/roomhacker/agents-projects/apps/forks/openchamber/.superpowers/sdd/task-4-brief.md`
++
++## Outcome
++
++Implemented the Task 4 UI slice as discovery-only for Task/MCP actions, with an explicit visible unsupported state for direct invocation because the current OpenCode runtime does not expose a safe direct Task/MCP call contract.
++
++Implemented native child-to-parent last-answer handoff using real session/message APIs only.
++
++Did not invent or route through any fake Task/MCP endpoint.
++
++## What changed
++
++### Added
++
++- `packages/ui/src/components/chat/ComposerToolMenu.tsx`
++  - Dropdown menu for runtime-discovered Task and MCP actions.
++  - Renders explicit `Unsupported` status plus the missing-contract message.
++
++- `packages/ui/src/lib/opencode/tool-call-client.ts`
++  - `listCallableActions(...)`
++  - `callAction(...)`
++  - `sendLastChildAnswerToParent(...)`
++  - Uses runtime-proven discovery only:
++    - Task discovery from visible subagent/all agents when `agentControlToolEnabled` is enabled
++    - MCP discovery from runtime MCP status
++  - Direct invocation intentionally rejects with:
++    - `Direct Task/MCP invocation is not exposed by the current OpenCode runtime.`
++
++- Tests
++  - `packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx`
++  - `packages/ui/src/lib/opencode/tool-call-client.test.ts`
++
++### Updated
++
++- `packages/ui/src/components/chat/ChatInput.tsx`
++  - Mounts the composer Task/MCP menu in mobile and desktop footer controls.
++  - Unsupported selections surface a visible toast instead of silently converting to text.
++
++- `packages/ui/src/stores/useMcpStore.ts`
++  - Added MCP discovery entry normalization helper for menu rendering.
++
++- `packages/ui/src/lib/opencode/client.ts`
++  - `getSessionMessages(...)` now accepts an explicit directory override so parent handoff can read the correct session stream without assuming the current runtime directory.
++
++- `packages/ui/src/sync/session-actions.ts`
++  - Added plain session-message send helper that reuses real optimistic send + real session send APIs for internal handoff.
++
++- `packages/ui/src/components/chat/ChatMessage.tsx`
++  - Adds child-session “send last child answer to parent” action wiring.
++
++- `packages/ui/src/components/chat/message/MessageBody.tsx`
++  - Accepts an injected assistant transfer action so the existing message action slot can host the parent handoff button.
++
++## Test-first evidence
++
++Added the new tests first and ran them in a failing state:
++
++- `bun test packages/ui/src/lib/opencode/tool-call-client.test.ts packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx`
++  - Initial result: failed because the new modules did not exist yet.
++
++After implementation:
++
++- `bun test packages/ui/src/lib/opencode/tool-call-client.test.ts packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx`
++  - Final result: 6 passing, 0 failing.
++
++## UI type-check
++
++Ran:
++
++- `bun run type-check:ui`
++
++Result:
++
++- Not clean at repository baseline.
++- Task 4 local type issues were fixed during the run.
++- Remaining failures are pre-existing/unrelated workspace errors, including:
++  - missing i18n keys in `FailedTurnRecoveryControls.tsx`
++  - incomplete localized message maps in multiple `src/lib/i18n/messages/*.ts`
++  - unrelated resilience/recovery typing drift
++  - unrelated OpenCode SDK typing drift in existing recovery helpers already present in the worktree
++
++No attempt was made to fix those unrelated tracks because the task scope was limited to Task 4 in OpenChamber and the user explicitly asked not to broaden into OpenCode/OmniRoute work.
++
++## Runtime-contract conclusion
++
++Confirmed limitation:
++
++- Direct Task/MCP invocation is still unsupported in the current runtime contract exposed to this client.
++- Therefore the implemented menu is discovery-only and visibly unsupported for direct invocation.
++
++Implemented supported path:
++
++- Parent handoff uses the real child session → parent session relationship plus real session message read/send APIs.
++
++## Concerns / follow-up
++
++1. Direct Task/MCP execution remains blocked on a native OpenCode runtime contract that safely exposes callable action execution.
++2. The repository UI type-check is currently red for unrelated baseline issues, so Task 4 cannot claim a fully clean UI type-check gate until those external errors are resolved.
+diff --git a/packages/ui/src/components/chat/ChatInput.tsx b/packages/ui/src/components/chat/ChatInput.tsx
+index 51a0d889..b8559833 100644
+--- a/packages/ui/src/components/chat/ChatInput.tsx
++++ b/packages/ui/src/components/chat/ChatInput.tsx
+@@ -134,6 +134,7 @@ import {
+ } from './composer/ui/DraftTargetSelectors';
+ import { ComposerAutocompletePopups } from './composer/ui/ComposerAutocompletePopups';
+ import { ComposerFooter } from './composer/ui/ComposerFooter';
++import type { CallableAction } from '@/lib/opencode/tool-call-client';
+ import { MobilePillComposer } from './composer/ui/MobilePillComposer';
+ import { ComposerContextChips } from './composer/ui/ComposerContextChips';
+ import { LinkedReferenceRow } from './composer/ui/LinkedReferenceRow';
+@@ -842,6 +843,12 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
+ 
+     const canAbort = sessionPhase !== 'idle';
+ 
++    const handleComposerToolAction = React.useCallback(async (action: CallableAction) => {
++        if (!action.supported) {
++            toast.error(action.unsupportedReason ?? 'This runtime does not expose a safe direct action contract yet.');
++        }
++    }, []);
++
+     const getCurrentInputSnapshot = React.useCallback(() => {
+         const currentMessage = composerRef.current?.getValue() ?? message;
+         return {
+@@ -2672,6 +2679,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
+                         onPrimaryAction={handlePrimaryAction}
+                         onQueueMessage={handleQueueMessage}
+                         onAbort={handleAbort}
++                        onSelectToolAction={handleComposerToolAction}
+                         onStartDictation={toggleDictation}
+                         onDictationInsert={handleDictationInsert}
+                         onDictationInsertAndSend={handleDictationInsertAndSend}
+diff --git a/packages/ui/src/components/chat/ChatMessage.tsx b/packages/ui/src/components/chat/ChatMessage.tsx
+index 5b45b4b3..3380b783 100644
+--- a/packages/ui/src/components/chat/ChatMessage.tsx
++++ b/packages/ui/src/components/chat/ChatMessage.tsx
+@@ -37,6 +37,7 @@ import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+ import { getContextObligatoryMessages } from '@/lib/contextObligatoryMessages';
+ import { setContextObligatoryMessage } from '@/sync/session-actions';
+ import { isVSCodeRuntime } from '@/lib/desktop';
++import { sendLastChildAnswerToParent } from '@/lib/opencode/tool-call-client';
+ 
+ const ToolOutputDialog = lazyWithChunkRecovery(() => import('./message/ToolOutputDialog'));
+ 
+@@ -405,6 +406,33 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+             ?? state.archivedSessions.find((candidate) => candidate.id === sessionId);
+         return getContextObligatoryMessages(session).some((entry) => entry.id === message.info.id);
+     });
++    const parentSessionID = useGlobalSessionsStore((state) => {
++        const session = state.activeSessions.find((candidate) => candidate.id === sessionId)
++            ?? state.archivedSessions.find((candidate) => candidate.id === sessionId);
++        const parentID = (session as { parentID?: unknown } | undefined)?.parentID;
++        return typeof parentID === 'string' && parentID.trim().length > 0 ? parentID : null;
++    });
++    const childSessionTransferAction = React.useMemo(() => {
++        if (isUser || !sessionId || !parentSessionID) return undefined;
++        return {
++            ariaLabel: 'Send last child answer to parent',
++            tooltip: 'Send last child answer to parent',
++            onClick: async () => {
++                try {
++                    const directory = useSessionUIStore.getState().getDirectoryForSession(sessionId);
++                    if (!directory) {
++                        throw new Error('The child session is not mapped to a project directory');
++                    }
++                    await sendLastChildAnswerToParent(sessionId, directory);
++                    toast.success('Sent the latest child answer to the parent session');
++                } catch (error) {
++                    console.error('[chat-message] failed to send child answer to parent', error);
++                    const messageText = error instanceof Error ? error.message : 'Failed to send the child answer to the parent session';
++                    toast.error(messageText);
++                }
++            },
++        };
++    }, [isUser, parentSessionID, sessionId]);
+     const [pinPending, setPinPending] = React.useState(false);
+     const handleToggleContextPin = React.useCallback(async () => {
+         if (!sessionId || !messageCreatedAt || pinPending) return;
+@@ -1161,6 +1189,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+                                 errorMessage={assistantErrorText}
+                                 errorVariant={assistantErrorVariant}
+                                 reviewTransferDirection={reviewTransferDirection}
++                                assistantTransferAction={childSessionTransferAction}
+                                 footerProviderID={headerProviderID}
+                                 footerModelName={headerModelName}
+                                 footerAgentName={headerAgentName}
+diff --git a/packages/ui/src/components/chat/ComposerToolMenu.tsx b/packages/ui/src/components/chat/ComposerToolMenu.tsx
+new file mode 100644
+index 00000000..81acd3dd
+--- /dev/null
++++ b/packages/ui/src/components/chat/ComposerToolMenu.tsx
+@@ -0,0 +1,138 @@
++import React from 'react';
++
++import { Button } from '@/components/ui/button';
++import {
++  DropdownMenu,
++  DropdownMenuContent,
++  DropdownMenuItem,
++  DropdownMenuTrigger,
++} from '@/components/ui/dropdown-menu';
++import { Icon } from '@/components/icon/Icon';
++import { cn } from '@/lib/utils';
++import type { CallableAction } from '@/lib/opencode/tool-call-client';
++import { listCallableActions } from '@/lib/opencode/tool-call-client';
++
++type ComposerToolMenuContentProps = {
++  actions: CallableAction[];
++  loading: boolean;
++  onSelectAction: (action: CallableAction) => void;
++};
++
++export function ComposerToolMenuContent({
++  actions,
++  loading,
++  onSelectAction,
++}: ComposerToolMenuContentProps): React.ReactElement {
++  if (loading) {
++    return (
++      <div className="min-w-[20rem] px-3 py-2 text-sm text-muted-foreground">
++        Loading Task and MCP actions…
++      </div>
++    );
++  }
++
++  if (actions.length === 0) {
++    return (
++      <div className="min-w-[20rem] px-3 py-2 text-sm text-muted-foreground">
++        No Task or MCP actions were discovered for this session.
++      </div>
++    );
++  }
++
++  return (
++    <div className="min-w-[22rem] py-1">
++      {actions.map((action) => (
++        <DropdownMenuItem
++          key={action.id}
++          className="items-start"
++          onSelect={() => onSelectAction(action)}
++        >
++          <div className="flex w-full flex-col gap-1" data-action-kind={action.kind}>
++            <div className="flex items-center justify-between gap-3">
++              <span className="font-medium text-foreground">{action.label}</span>
++              {!action.supported ? (
++                <span className="rounded-full border border-border/80 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
++                  Unsupported
++                </span>
++              ) : null}
++            </div>
++            <div className="text-xs text-muted-foreground">
++              {action.supported
++                ? (action.statusLabel ?? 'Available')
++                : (action.unsupportedReason ?? action.statusLabel ?? 'Unavailable')}
++            </div>
++          </div>
++        </DropdownMenuItem>
++      ))}
++    </div>
++  );
++}
++
++type ComposerToolMenuProps = {
++  sessionId: string | null;
++  directory?: string | null;
++  buttonClassName: string;
++  iconClassName: string;
++  onSelectAction: (action: CallableAction) => void;
++};
++
++export function ComposerToolMenu({
++  sessionId,
++  directory,
++  buttonClassName,
++  iconClassName,
++  onSelectAction,
++}: ComposerToolMenuProps): React.ReactElement {
++  const [open, setOpen] = React.useState(false);
++  const [loading, setLoading] = React.useState(false);
++  const [actions, setActions] = React.useState<CallableAction[]>([]);
++
++  React.useEffect(() => {
++    if (!open || !sessionId) return;
++
++    let cancelled = false;
++    setLoading(true);
++    void listCallableActions(sessionId, directory)
++      .then((nextActions) => {
++        if (!cancelled) {
++          setActions(nextActions);
++        }
++      })
++      .finally(() => {
++        if (!cancelled) {
++          setLoading(false);
++        }
++      });
++
++    return () => {
++      cancelled = true;
++    };
++  }, [directory, open, sessionId]);
++
++  return (
++    <DropdownMenu open={open} onOpenChange={setOpen}>
++      <DropdownMenuTrigger asChild>
++        <Button
++          type="button"
++          variant="ghost"
++          size="icon"
++          className={buttonClassName}
++          disabled={!sessionId}
++          title="Task and MCP actions"
++          aria-label="Task and MCP actions"
++        >
++          <Icon name="tools" className={cn(iconClassName, 'text-current')} />
++        </Button>
++      </DropdownMenuTrigger>
++      <DropdownMenuContent align="start">
++        <ComposerToolMenuContent
++          actions={actions}
++          loading={loading}
++          onSelectAction={onSelectAction}
++        />
++      </DropdownMenuContent>
++    </DropdownMenu>
++  );
++}
++
++export default ComposerToolMenu;
+diff --git a/packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx b/packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx
+new file mode 100644
+index 00000000..9e2f9e21
+--- /dev/null
++++ b/packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx
+@@ -0,0 +1,76 @@
++import React from 'react';
++import { describe, expect, mock, test } from 'bun:test';
++import { renderToStaticMarkup } from 'react-dom/server';
++
++import type { CallableAction } from '@/lib/opencode/tool-call-client';
++
++type MockMenuProps = React.PropsWithChildren<{
++  disabled?: boolean;
++  className?: string;
++  align?: string;
++}>;
++
++mock.module('@/components/ui/dropdown-menu', () => ({
++  DropdownMenu: ({ children }: MockMenuProps) => <div data-dropdown-root>{children}</div>,
++  DropdownMenuTrigger: ({ children }: MockMenuProps) => <div data-dropdown-trigger>{children}</div>,
++  DropdownMenuContent: ({ children }: MockMenuProps) => <div data-dropdown-content>{children}</div>,
++  DropdownMenuItem: ({ children, disabled }: MockMenuProps) => <div data-disabled={disabled ? 'true' : undefined}>{children}</div>,
++}));
++
++mock.module('@/components/ui/button', () => ({
++  Button: ({ children, ...props }: React.PropsWithChildren<Record<string, unknown>>) => <button {...props}>{children}</button>,
++}));
++
++mock.module('@/components/ui/icon', () => ({
++  Icon: ({ name }: { name: string }) => <span>{name}</span>,
++}));
++
++const { ComposerToolMenuContent } = await import('../ComposerToolMenu');
++
++describe('ComposerToolMenuContent', () => {
++  test('renders the unsupported state for discovered Task and MCP actions', () => {
++    const actions: CallableAction[] = [
++      {
++        kind: 'task',
++        id: 'task:planner',
++        label: 'Task: planner',
++        supported: false,
++        unsupportedReason: 'Direct Task/MCP invocation is not exposed by the current OpenCode runtime.',
++      },
++      {
++        kind: 'mcp',
++        id: 'mcp:github',
++        label: 'MCP: github',
++        supported: false,
++        unsupportedReason: 'Direct Task/MCP invocation is not exposed by the current OpenCode runtime.',
++      },
++    ];
++
++    const markup = renderToStaticMarkup(
++      <ComposerToolMenuContent
++        actions={actions}
++        loading={false}
++        onSelectAction={() => undefined}
++      />,
++    );
++
++    expect(markup).toContain('Task: planner');
++    expect(markup).toContain('MCP: github');
++    expect(markup).toContain('Unsupported');
++    expect(markup).toContain('Direct Task/MCP invocation is not exposed by the current OpenCode runtime.');
++    expect(markup).toContain('data-action-kind="task"');
++    expect(markup).toContain('data-action-kind="mcp"');
++  });
++
++  test('renders an explicit empty state when no runtime-backed actions are discovered', () => {
++    const markup = renderToStaticMarkup(
++      <ComposerToolMenuContent
++        actions={[]}
++        loading={false}
++        onSelectAction={() => undefined}
++      />,
++    );
++
++    expect(markup).toContain('No Task or MCP actions were discovered for this session.');
++  });
++});
+diff --git a/packages/ui/src/components/chat/composer/ui/ComposerFooter.tsx b/packages/ui/src/components/chat/composer/ui/ComposerFooter.tsx
+index 4f651b05..2a577b40 100644
+--- a/packages/ui/src/components/chat/composer/ui/ComposerFooter.tsx
++++ b/packages/ui/src/components/chat/composer/ui/ComposerFooter.tsx
+@@ -24,6 +24,8 @@ import { ComposerActionButtons } from './ComposerActionButtons';
+ import { ComposerAttachmentControls } from './ComposerAttachmentControls';
+ import { FocusModeButton } from './FocusModeButton';
+ import { PermissionAutoAcceptButton } from './PermissionAutoAcceptButton';
++import { ComposerToolMenu } from '../../ComposerToolMenu';
++import type { CallableAction } from '@/lib/opencode/tool-call-client';
+ 
+ const MemoModelControls = React.memo(ModelControls);
+ const MemoComposerDictation = React.memo(ComposerDictation);
+@@ -62,6 +64,7 @@ export interface ComposerFooterProps {
+     onPrimaryAction: () => void;
+     onQueueMessage: () => void;
+     onAbort: () => void;
++    onSelectToolAction: (action: CallableAction) => void;
+     onStartDictation: () => void;
+     onDictationInsert: (text: string) => void;
+     onDictationInsertAndSend: (text: string) => void;
+@@ -101,6 +104,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
+         onPrimaryAction,
+         onQueueMessage,
+         onAbort,
++        onSelectToolAction,
+         onStartDictation,
+         onDictationInsert,
+         onDictationInsertAndSend,
+@@ -152,6 +156,13 @@ export function ComposerFooter(props: ComposerFooterProps) {
+                                 footerIconButtonClass={footerIconButtonClass}
+                                 iconSizeClass={iconSizeClass}
+                             />
++                            <ComposerToolMenu
++                                sessionId={currentSessionId}
++                                directory={directory}
++                                buttonClassName={footerIconButtonClass}
++                                iconClassName={iconSizeClass}
++                                onSelectAction={onSelectToolAction}
++                            />
+                             <SessionGoalObjectiveCounter length={messageLength} />
+                         </div>
+                         <div className="flex items-center min-w-0 gap-x-1 justify-end">
+@@ -228,6 +239,13 @@ export function ComposerFooter(props: ComposerFooterProps) {
+                             iconSizeClass={iconSizeClass}
+                             withTooltip
+                         />
++                        <ComposerToolMenu
++                            sessionId={currentSessionId}
++                            directory={directory}
++                            buttonClassName={footerIconButtonClass}
++                            iconClassName={iconSizeClass}
++                            onSelectAction={onSelectToolAction}
++                        />
+                         <SessionGoalObjectiveCounter length={messageLength} />
+                     </div>
+                     <div className={cn('flex items-center flex-1 justify-end', footerGapClass, 'md:gap-x-3')}>
+diff --git a/packages/ui/src/components/chat/message/MessageBody.tsx b/packages/ui/src/components/chat/message/MessageBody.tsx
+index 56b3bd70..492dbb0e 100644
+--- a/packages/ui/src/components/chat/message/MessageBody.tsx
++++ b/packages/ui/src/components/chat/message/MessageBody.tsx
+@@ -436,6 +436,11 @@ interface MessageBodyProps {
+     userActionsMode?: 'inline' | 'external-content' | 'external-actions';
+     stickyUserHeaderEnabled?: boolean;
+     reviewTransferDirection?: ReviewTransferDirection | null;
++    assistantTransferAction?: {
++        ariaLabel: string;
++        tooltip: string;
++        onClick: () => void | Promise<void>;
++    };
+     contextPinned?: boolean;
+     contextPinPending?: boolean;
+     onToggleContextPin?: () => void;
+@@ -1093,6 +1098,7 @@ const AssistantMessageBody = React.memo(({
+     errorMessage,
+     errorVariant = 'error',
+     reviewTransferDirection = null,
++    assistantTransferAction,
+     contextPinned,
+     contextPinPending,
+     onToggleContextPin,
+@@ -1289,6 +1295,7 @@ const AssistantMessageBody = React.memo(({
+             },
+         };
+     }, [assistantPlanText, effectiveDirectory, effectiveReviewTransferDirection, sessionId, t]);
++    const effectiveAssistantTransferAction = reviewTransferAction ?? assistantTransferAction;
+     const [isPlanDialogOpen, setIsPlanDialogOpen] = React.useState(false);
+     const [isSavingPlan, setIsSavingPlan] = React.useState(false);
+     const [isForkDialogOpen, setIsForkDialogOpen] = React.useState(false);
+@@ -1702,9 +1709,9 @@ const AssistantMessageBody = React.memo(({
+             onCopyMessage={onCopyMessage}
+             onShareImage={shareMessageAsImage}
+             ttsText={assistantPlanText}
+-            reviewTransferAction={reviewTransferAction}
++            reviewTransferAction={effectiveAssistantTransferAction}
+         />
+-    ), [assistantPlanText, hasCopyableText, isTouchContext, onCopyMessage, reviewTransferAction, shareMessageAsImage]);
++    ), [assistantPlanText, effectiveAssistantTransferAction, hasCopyableText, isTouchContext, onCopyMessage, shareMessageAsImage]);
+ 
+     const renderJustificationActions = React.useCallback((activity: NonNullable<TurnGroupingContext['activityParts']>[number]) => {
+         if (!showSplitAssistantMessageActions || !isSortedRenderMode) {
+diff --git a/packages/ui/src/lib/opencode/client.ts b/packages/ui/src/lib/opencode/client.ts
+index 80fba7d6..9845a6d1 100644
+--- a/packages/ui/src/lib/opencode/client.ts
++++ b/packages/ui/src/lib/opencode/client.ts
+@@ -568,10 +568,11 @@ class OpencodeService {
+     return unwrapSdkData(response, 'session.update');
+   }
+ 
+-  async getSessionMessages(id: string, limit?: number): Promise<{ info: Message; parts: Part[] }[]> {
++  async getSessionMessages(id: string, limit?: number, directory?: string | null): Promise<{ info: Message; parts: Part[] }[]> {
++    const requestDirectory = this.normalizeCandidatePath(directory ?? null) ?? this.currentDirectory;
+     const response = await this.client.session.messages({
+       sessionID: id,
+-      ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
++      ...(requestDirectory ? { directory: requestDirectory } : {}),
+       ...(typeof limit === 'number' ? { limit } : {}),
+     });
+     return unwrapSdkData(response, 'session.messages');
+diff --git a/packages/ui/src/lib/opencode/tool-call-client.test.ts b/packages/ui/src/lib/opencode/tool-call-client.test.ts
+new file mode 100644
+index 00000000..23db9873
+--- /dev/null
++++ b/packages/ui/src/lib/opencode/tool-call-client.test.ts
+@@ -0,0 +1,172 @@
++import { beforeEach, describe, expect, mock, test } from 'bun:test';
++import type { Agent, Message, Part, Session } from '@opencode-ai/sdk/v2/client';
++
++let agentControlToolEnabled = true;
++let listedAgents: Agent[] = [];
++let mcpStatusByName: Record<string, { status?: string }> = {};
++let sessionsById: Record<string, Session> = {};
++let messagesBySessionId: Record<string, Array<{ info: Message; parts: Part[] }>> = {};
++const sendPlainSessionMessageCalls: Array<{ sessionID: string; directory: string; text: string }> = [];
++
++mock.module('@/stores/useUIStore', () => ({
++  useUIStore: {
++    getState: () => ({ agentControlToolEnabled }),
++  },
++}));
++
++mock.module('@/stores/useMcpStore', () => ({
++  useMcpStore: {
++    getState: () => ({
++      getStatusForDirectory: () => mcpStatusByName,
++    }),
++  },
++  listDiscoveredMcpEntries: (status: Record<string, { status?: string }>) => Object.entries(status)
++    .sort(([left], [right]) => left.localeCompare(right))
++    .map(([name, value]) => ({
++      id: `mcp:${name}`,
++      label: `MCP: ${name}`,
++      name,
++      status: value.status ?? 'unknown',
++      statusLabel: value.status ?? 'unknown',
++    })),
++}));
++
++mock.module('@/lib/opencode/client', () => ({
++  opencodeClient: {
++    listAgents: mock(async () => listedAgents),
++    getSession: mock(async (sessionID: string) => {
++      const session = sessionsById[sessionID];
++      if (!session) throw new Error(`Unknown session: ${sessionID}`);
++      return session;
++    }),
++    getSessionMessages: mock(async (sessionID: string) => messagesBySessionId[sessionID] ?? []),
++  },
++}));
++
++mock.module('@/sync/session-actions', () => ({
++  sendPlainSessionMessage: mock(async (sessionID: string, directory: string, text: string) => {
++    sendPlainSessionMessageCalls.push({ sessionID, directory, text });
++    return 'msg_parent_handoff';
++  }),
++}));
++
++const {
++  DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++  callAction,
++  listCallableActions,
++  sendLastChildAnswerToParent,
++} = await import('./tool-call-client');
++
++describe('tool-call-client', () => {
++  beforeEach(() => {
++    agentControlToolEnabled = true;
++    listedAgents = [];
++    mcpStatusByName = {};
++    sessionsById = {};
++    messagesBySessionId = {};
++    sendPlainSessionMessageCalls.length = 0;
++  });
++
++  test('lists runtime-proven Task and MCP discovery entries as visibly unsupported actions', async () => {
++    listedAgents = [
++      { name: 'planner', mode: 'subagent' } as Agent,
++      { name: 'reviewer', mode: 'all' } as Agent,
++      { name: 'primary-only', mode: 'primary' } as Agent,
++      { name: 'hidden-helper', mode: 'subagent', hidden: true } as Agent,
++    ];
++    mcpStatusByName = {
++      github: { status: 'connected' },
++      slack: { status: 'needs_auth' },
++    };
++
++    const actions = await listCallableActions('session-child', '/repo/app');
++
++    expect(actions).toEqual([
++      {
++        kind: 'task',
++        id: 'task:planner',
++        label: 'Task: planner',
++        supported: false,
++        unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++      },
++      {
++        kind: 'task',
++        id: 'task:reviewer',
++        label: 'Task: reviewer',
++        supported: false,
++        unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++      },
++      {
++        kind: 'mcp',
++        id: 'mcp:github',
++        label: 'MCP: github',
++        statusLabel: 'connected',
++        supported: false,
++        unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++      },
++      {
++        kind: 'mcp',
++        id: 'mcp:slack',
++        label: 'MCP: slack',
++        statusLabel: 'needs_auth',
++        supported: false,
++        unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++      },
++    ]);
++  });
++
++  test('rejects discovered direct actions when the runtime lacks a safe invocation contract', async () => {
++    listedAgents = [{ name: 'planner', mode: 'subagent' } as Agent];
++
++    await expect(callAction({
++      sessionId: 'session-child',
++      actionId: 'task:planner',
++      arguments: { brief: 'Investigate' },
++      directory: '/repo/app',
++    })).rejects.toThrow(DIRECT_ACTION_UNSUPPORTED_MESSAGE);
++  });
++
++  test('sends the latest completed child assistant answer to the native parent session', async () => {
++    sessionsById = {
++      'session-child': { id: 'session-child', parentID: 'session-parent' } as Session,
++    };
++    messagesBySessionId = {
++      'session-child': [
++        {
++          info: { id: 'msg_user', role: 'user', time: { created: 1, completed: 1 } } as unknown as Message,
++          parts: [{ id: 'prt_user', type: 'text', text: 'question' } as Part],
++        },
++        {
++          info: { id: 'msg_answer_1', role: 'assistant', finish: 'stop', time: { created: 2, completed: 3 } } as unknown as Message,
++          parts: [{ id: 'prt_answer_1', type: 'text', text: 'first answer' } as Part],
++        },
++        {
++          info: { id: 'msg_streaming', role: 'assistant', time: { created: 4, completed: 0 } } as unknown as Message,
++          parts: [{ id: 'prt_streaming', type: 'text', text: 'still streaming' } as Part],
++        },
++        {
++          info: { id: 'msg_answer_2', role: 'assistant', finish: 'stop', time: { created: 5, completed: 6 } } as unknown as Message,
++          parts: [{ id: 'prt_answer_2', type: 'text', text: 'latest completed answer' } as Part],
++        },
++      ],
++    };
++
++    await sendLastChildAnswerToParent('session-child', '/repo/app');
++
++    expect(sendPlainSessionMessageCalls).toEqual([
++      {
++        sessionID: 'session-parent',
++        directory: '/repo/app',
++        text: 'latest completed answer',
++      },
++    ]);
++  });
++
++  test('fails parent handoff when the child session has no native parent', async () => {
++    sessionsById = {
++      orphan: { id: 'orphan', parentID: '' } as Session,
++    };
++
++    await expect(sendLastChildAnswerToParent('orphan', '/repo/app')).rejects.toThrow('parent');
++  });
++});
+diff --git a/packages/ui/src/lib/opencode/tool-call-client.ts b/packages/ui/src/lib/opencode/tool-call-client.ts
+new file mode 100644
+index 00000000..90cb8069
+--- /dev/null
++++ b/packages/ui/src/lib/opencode/tool-call-client.ts
+@@ -0,0 +1,152 @@
++import type { Agent, Message } from '@opencode-ai/sdk/v2/client';
++
++import { flattenAssistantTextParts } from '@/lib/messages/messageText';
++import { opencodeClient } from '@/lib/opencode/client';
++import { useMcpStore, listDiscoveredMcpEntries } from '@/stores/useMcpStore';
++import { useUIStore } from '@/stores/useUIStore';
++import { sendPlainSessionMessage } from '@/sync/session-actions';
++
++export const DIRECT_ACTION_UNSUPPORTED_MESSAGE = 'Direct Task/MCP invocation is not exposed by the current OpenCode runtime.';
++
++export type CallableAction = {
++  kind: 'task' | 'mcp';
++  id: string;
++  label: string;
++  inputSchema?: unknown;
++  supported: boolean;
++  unsupportedReason?: string;
++  statusLabel?: string;
++};
++
++type AgentWithVisibility = Agent & {
++  hidden?: boolean;
++  options?: { hidden?: boolean };
++  mode?: 'primary' | 'subagent' | 'all' | string;
++};
++
++const isActionablyVisibleTaskAgent = (agent: Agent): boolean => {
++  const candidate = agent as AgentWithVisibility;
++  const isHidden = candidate.hidden === true || candidate.options?.hidden === true;
++  if (isHidden) return false;
++  return candidate.mode === 'subagent' || candidate.mode === 'all';
++};
++
++const toTaskAction = (agent: Agent): CallableAction => ({
++  kind: 'task',
++  id: `task:${agent.name}`,
++  label: `Task: ${agent.name}`,
++  supported: false,
++  unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++});
++
++const isMessageCompleted = (message: Message): boolean => {
++  const finish = (message as { finish?: unknown }).finish;
++  if (typeof finish === 'string' && finish.length > 0) return true;
++  const completed = (message as { time?: { completed?: unknown } }).time?.completed;
++  return typeof completed === 'number' && completed > 0;
++};
++
++const getMessageCreatedAt = (message: Message): number => {
++  const created = (message as { time?: { created?: unknown } }).time?.created;
++  return typeof created === 'number' && Number.isFinite(created) ? created : 0;
++};
++
++const getLatestCompletedAssistantText = (
++  messages: Array<{ info: Message; parts: unknown[] }>,
++): string | null => {
++  const assistantMessages = messages
++    .filter((entry) => entry.info.role === 'assistant')
++    .filter((entry) => isMessageCompleted(entry.info))
++    .sort((left, right) => getMessageCreatedAt(right.info) - getMessageCreatedAt(left.info));
++
++  for (const entry of assistantMessages) {
++    const text = flattenAssistantTextParts(entry.parts as Parameters<typeof flattenAssistantTextParts>[0]).trim();
++    if (text) return text;
++  }
++
++  return null;
++};
++
++const getDiscoveredTaskActions = async (directory?: string | null): Promise<CallableAction[]> => {
++  if (!useUIStore.getState().agentControlToolEnabled) {
++    return [];
++  }
++
++  try {
++    const agents = await opencodeClient.listAgents(directory);
++    return agents
++      .filter(isActionablyVisibleTaskAgent)
++      .sort((left, right) => left.name.localeCompare(right.name))
++      .map(toTaskAction);
++  } catch {
++    return [];
++  }
++};
++
++export async function listCallableActions(sessionId: string, directory?: string | null): Promise<CallableAction[]> {
++  void sessionId;
++  const [taskActions, mcpEntries] = await Promise.all([
++    getDiscoveredTaskActions(directory),
++    Promise.resolve(listDiscoveredMcpEntries(useMcpStore.getState().getStatusForDirectory(directory))),
++  ]);
++
++  return [
++    ...taskActions,
++    ...mcpEntries.map((entry) => ({
++      kind: 'mcp' as const,
++      id: entry.id,
++      label: entry.label,
++      statusLabel: entry.statusLabel,
++      supported: false,
++      unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++    })),
++  ];
++}
++
++export async function callAction(input: {
++  sessionId: string;
++  actionId: string;
++  arguments: Record<string, unknown>;
++  directory?: string;
++}): Promise<void> {
++  if (!input.actionId.trim()) {
++    throw new Error('Action ID is required');
++  }
++  if (!input.arguments || Array.isArray(input.arguments)) {
++    throw new Error('Action arguments must be an object');
++  }
++
++  const actions = await listCallableActions(input.sessionId, input.directory);
++  const action = actions.find((candidate) => candidate.id === input.actionId);
++  if (!action) {
++    throw new Error(`Unknown action: ${input.actionId}`);
++  }
++  if (!action.supported) {
++    throw new Error(action.unsupportedReason ?? DIRECT_ACTION_UNSUPPORTED_MESSAGE);
++  }
++
++  throw new Error(DIRECT_ACTION_UNSUPPORTED_MESSAGE);
++}
++
++export async function sendLastChildAnswerToParent(childSessionId: string, directory?: string | null): Promise<void> {
++  const childSession = await opencodeClient.getSession(childSessionId, directory);
++  const parentID = typeof (childSession as { parentID?: unknown }).parentID === 'string'
++    ? (childSession as { parentID: string }).parentID.trim()
++    : '';
++  if (!parentID) {
++    throw new Error('This child session does not have a native parent session to receive a handoff');
++  }
++
++  const messages = await opencodeClient.getSessionMessages(childSessionId, undefined, directory);
++  const latestAssistantText = getLatestCompletedAssistantText(messages);
++  if (!latestAssistantText) {
++    throw new Error('No completed assistant answer is available to hand off to the parent session');
++  }
++
++  const targetDirectory = directory?.trim();
++  if (!targetDirectory) {
++    throw new Error('A directory is required to hand the child answer back to the parent session');
++  }
++
++  await sendPlainSessionMessage(parentID, targetDirectory, latestAssistantText);
++}
+diff --git a/packages/ui/src/stores/useMcpStore.ts b/packages/ui/src/stores/useMcpStore.ts
+index d542fc8f..266826a6 100644
+--- a/packages/ui/src/stores/useMcpStore.ts
++++ b/packages/ui/src/stores/useMcpStore.ts
+@@ -5,6 +5,13 @@ import { opencodeClient } from '@/lib/opencode/client';
+ import { useDirectoryStore } from '@/stores/useDirectoryStore';
+ 
+ export type McpStatusMap = Record<string, McpStatus>;
++export type McpDiscoveryEntry = {
++  id: string;
++  label: string;
++  name: string;
++  status: string;
++  statusLabel: string;
++};
+ type McpRuntimeDiagnostic = {
+   status: 'failed';
+   error: string;
+@@ -39,6 +46,30 @@ const getMcpApiClient = (directory: string | null | undefined) => {
+   return opencodeClient.getScopedApiClient(normalized);
+ };
+ 
++const MCP_STATUS_LABELS: Record<string, string> = {
++  connected: 'Connected',
++  failed: 'Failed',
++  needs_auth: 'Needs auth',
++  needs_client_registration: 'Needs client registration',
++};
++
++export const listDiscoveredMcpEntries = (status: McpStatusMap | null | undefined): McpDiscoveryEntry[] => {
++  return Object.entries(status ?? {})
++    .sort(([left], [right]) => left.localeCompare(right))
++    .map(([name, value]) => {
++      const statusValue = typeof value?.status === 'string' && value.status.trim().length > 0
++        ? value.status
++        : 'unknown';
++      return {
++        id: `mcp:${name}`,
++        label: `MCP: ${name}`,
++        name,
++        status: statusValue,
++        statusLabel: MCP_STATUS_LABELS[statusValue] ?? statusValue,
++      };
++    });
++};
++
+ export const computeMcpHealth = (status: McpStatusMap | null | undefined): McpHealth => {
+   const entries = Object.entries(status ?? {});
+   const connected = entries.filter(([, s]) => s?.status === 'connected').length;
+diff --git a/packages/ui/src/sync/session-actions.ts b/packages/ui/src/sync/session-actions.ts
+index 7f505672..2286ade2 100644
+--- a/packages/ui/src/sync/session-actions.ts
++++ b/packages/ui/src/sync/session-actions.ts
+@@ -12,6 +12,7 @@ import { computeSubtreeIds } from "./scoped-blocking-requests"
+ import { opencodeClient } from "@/lib/opencode/client"
+ import { mergeSessionDirectoryMetadata, resolveGlobalSessionDirectory, useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
+ import { useConfigStore } from "@/stores/useConfigStore"
++import { useSelectionStore } from "./selection-store"
+ import { registerSessionDirectory } from "./sync-refs"
+ import { isSyntheticPart } from "@/lib/messages/synthetic"
+ import { materializeSessionSnapshots } from "./materialization"
+@@ -28,6 +29,7 @@ import { withContextObligatoryMessage, type ContextObligatoryMessage } from "@/l
+ import { getImperativeSessionMessageLoader } from "./session-message-loader"
+ import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
+ import { getRuntimeKey } from "@/lib/runtime-switch"
++import { markPendingUserSendAnimation } from "@/lib/userSendAnimation"
+ import { useSubagentWorkspaceSettingsStore } from "@/stores/useSubagentWorkspaceSettingsStore"
+ 
+ const MESSAGE_REFETCH_LIMIT = 100
+@@ -38,6 +40,13 @@ const MESSAGE_REFETCH_SKIP_PARTS = new Set(["patch", "step-start", "step-finish"
+ const UNREVERT_REFETCH_ATTEMPTS = 3
+ const UNREVERT_REFETCH_RETRY_MS = 150
+ 
++type SessionMessageModelContext = {
++  providerID: string
++  modelID: string
++  agent?: string
++  variant?: string
++}
++
+ // Reference set by SyncProvider — allows actions to access SDK and stores
+ let _sdk: OpencodeClient | null = null
+ let _childStores: ChildStoreManager | null = null
+@@ -194,6 +203,92 @@ export function getSessionLastAssistantModel(sessionId: string): { providerID: s
+   }
+ }
+ 
++export function resolveSessionMessageModelContext(sessionId: string): SessionMessageModelContext | null {
++  const selection = useSelectionStore.getState()
++  const config = useConfigStore.getState()
++  const lastChoice = useSessionUIStore.getState().getLastUserChoice(sessionId)
++  const agent = lastChoice?.agent || selection.getSessionAgentSelection(sessionId) || config.currentAgentName || undefined
++  const sessionModel = selection.getSessionModelSelection(sessionId)
++  const agentModel = agent ? selection.getAgentModelForSession(sessionId, agent) : null
++  const lastChoiceModel = lastChoice?.providerID && lastChoice.modelID
++    ? { providerId: lastChoice.providerID, modelId: lastChoice.modelID }
++    : null
++  const selectedModel = lastChoiceModel || agentModel || sessionModel || (config.currentProviderId && config.currentModelId
++    ? { providerId: config.currentProviderId, modelId: config.currentModelId }
++    : null)
++  if (!selectedModel?.providerId || !selectedModel?.modelId) return null
++  if (lastChoiceModel) {
++    return {
++      providerID: lastChoiceModel.providerId,
++      modelID: lastChoiceModel.modelId,
++      agent,
++      variant: lastChoice?.variant,
++    }
++  }
++
++  const selectionVariant = agent
++    ? selection.getAgentModelVariantForSession(sessionId, agent, selectedModel.providerId, selectedModel.modelId)
++    : undefined
++  const configVariant = config.currentProviderId === selectedModel.providerId && config.currentModelId === selectedModel.modelId
++    ? config.currentVariant
++    : undefined
++  return {
++    providerID: selectedModel.providerId,
++    modelID: selectedModel.modelId,
++    agent,
++    variant: selectionVariant || configVariant || undefined,
++  }
++}
++
++export async function sendPlainSessionMessage(
++  sessionId: string,
++  directory: string,
++  text: string,
++  modelContext?: SessionMessageModelContext | null,
++): Promise<string> {
++  const resolved = modelContext ?? resolveSessionMessageModelContext(sessionId)
++  if (!resolved) {
++    throw new Error("Select a model before sending this session handoff")
++  }
++
++  const selection = useSelectionStore.getState()
++  selection.saveSessionModelSelection(sessionId, resolved.providerID, resolved.modelID)
++  if (resolved.agent) {
++    selection.saveSessionAgentSelection(sessionId, resolved.agent)
++    selection.saveAgentModelForSession(sessionId, resolved.agent, resolved.providerID, resolved.modelID)
++    selection.saveAgentModelVariantForSession(sessionId, resolved.agent, resolved.providerID, resolved.modelID, resolved.variant)
++  }
++
++  markPendingUserSendAnimation(sessionId)
++  let sentMessageID: string | null = null
++  await optimisticSend({
++    sessionId,
++    content: text,
++    directory,
++    providerID: resolved.providerID,
++    modelID: resolved.modelID,
++    agent: resolved.agent,
++    onMessageID: (messageID) => {
++      sentMessageID = messageID
++    },
++    send: (messageID) => opencodeClient.sendMessage({
++      id: sessionId,
++      directory,
++      providerID: resolved.providerID,
++      modelID: resolved.modelID,
++      agent: resolved.agent,
++      variant: resolved.variant,
++      text,
++      messageId: messageID,
++    }).then(() => undefined),
++  })
++
++  if (!sentMessageID) {
++    throw new Error("Failed to prepare the handoff message")
++  }
++  return sentMessageID
++}
++
+ function updateLiveSession(session: Session, directory?: string): boolean {
+   const stores = _childStores
+   if (!stores) return false
+-- 
+2.34.1

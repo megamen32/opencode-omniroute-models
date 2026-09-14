@@ -1,0 +1,668 @@
+From c574cceaf4b1a2009c2ac05006bf15a7bbdf846c Mon Sep 17 00:00:00 2001
+From: roomhacker <roomhacker@bezrabotnyi.com>
+Date: Mon, 27 Jul 2026 19:45:02 +0300
+Subject: [PATCH] feat: finish resilient chat controls
+
+---
+ packages/ui/src/components/chat/ChatInput.tsx | 43 +++++++++++-
+ .../ui/src/components/chat/ChatMessage.tsx    | 10 +++
+ .../chat/FailedTurnRecoveryControls.tsx       | 12 ++++
+ .../__tests__/failedMessageRecovery.test.tsx  | 39 +++++++++++
+ .../chat/lib/turns/applyRetryOverlay.ts       | 18 +++++
+ packages/ui/src/lib/opencode/client.ts        | 67 +++++++++++++++++++
+ .../src/lib/opencode/tool-call-client.test.ts | 49 ++++++++++----
+ .../ui/src/lib/opencode/tool-call-client.ts   | 42 ++++++++++--
+ .../stores/useResilienceSettingsStore.test.ts | 31 +++++++++
+ .../src/stores/useResilienceSettingsStore.ts  |  1 +
+ .../src/sync/session-recovery-actions.test.ts | 24 ++-----
+ .../ui/src/sync/session-recovery-actions.ts   |  7 +-
+ 12 files changed, 303 insertions(+), 40 deletions(-)
+
+diff --git a/packages/ui/src/components/chat/ChatInput.tsx b/packages/ui/src/components/chat/ChatInput.tsx
+index 307b3b6e..8185efff 100644
+--- a/packages/ui/src/components/chat/ChatInput.tsx
++++ b/packages/ui/src/components/chat/ChatInput.tsx
+@@ -119,7 +119,7 @@ import { SessionGoalRow } from '@/components/chat/SessionGoalRow';
+ import { SessionGoalButton, SessionGoalObjectiveCounter } from '@/components/chat/SessionGoalButton';
+ import type { Part } from '@opencode-ai/sdk/v2/client';
+ import { ComposerToolMenu } from './ComposerToolMenu';
+-import type { CallableAction } from '@/lib/opencode/tool-call-client';
++import { callAction, type CallableAction } from '@/lib/opencode/tool-call-client';
+ 
+ const MAX_VISIBLE_TEXTAREA_LINES = 8;
+ const EMPTY_QUEUE: QueuedMessage[] = [];
+@@ -1823,11 +1823,48 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
+ 
+     const canAbort = sessionPhase !== 'idle';
+     const handleComposerToolAction = React.useCallback(async (action: CallableAction) => {
++        if (!currentSessionId) return;
+         if (!action.supported) {
+-            toast.error(action.unsupportedReason ?? 'This runtime does not expose a safe direct action contract yet.');
++            toast.error(action.unsupportedReason ?? 'This action is unavailable in the current OpenCode runtime.');
+             return;
+         }
+-    }, []);
++
++        const directory = currentSessionDirectoryForSync ?? currentDirectory;
++        let argumentsForCall: Record<string, unknown>;
++        if (action.kind === 'task') {
++            argumentsForCall = {
++                prompt: message.trim() || 'Continue the requested task from the current session context.',
++            };
++        } else {
++            const raw = message.trim();
++            if (!raw) {
++                argumentsForCall = {};
++            } else {
++                try {
++                    const parsed: unknown = JSON.parse(raw);
++                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
++                        throw new Error('MCP arguments must be a JSON object');
++                    }
++                    argumentsForCall = parsed as Record<string, unknown>;
++                } catch (error) {
++                    toast.error(error instanceof Error ? error.message : 'MCP arguments must be a JSON object');
++                    return;
++                }
++            }
++        }
++
++        try {
++            await callAction({
++                sessionId: currentSessionId,
++                actionId: action.id,
++                arguments: argumentsForCall,
++                directory: directory ?? undefined,
++            });
++            toast.success(`Called ${action.id}`);
++        } catch (error) {
++            toast.error(error instanceof Error ? error.message : String(error ?? 'Direct tool call failed'));
++        }
++    }, [currentDirectory, currentSessionDirectoryForSync, currentSessionId, message]);
+ 
+     const getCurrentInputSnapshot = React.useCallback(() => {
+         const currentMessage = textareaRef.current?.value ?? message;
+diff --git a/packages/ui/src/components/chat/ChatMessage.tsx b/packages/ui/src/components/chat/ChatMessage.tsx
+index 126d1259..c796c1b8 100644
+--- a/packages/ui/src/components/chat/ChatMessage.tsx
++++ b/packages/ui/src/components/chat/ChatMessage.tsx
+@@ -719,6 +719,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+                     providerID?: unknown;
+                     modelID?: unknown;
+                     variant?: unknown;
++                    actualModel?: unknown;
++                    fallbackUsed?: unknown;
+                 };
+                 message?: unknown;
+                 name?: unknown;
+@@ -743,12 +745,18 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+         const recoveryVariant = typeof errorInfo.data?.variant === 'string' && errorInfo.data.variant.trim().length > 0
+             ? errorInfo.data.variant
+             : previousUserMetadata?.variant;
++        const actualModel = typeof errorInfo.data?.actualModel === 'string' && errorInfo.data.actualModel.trim().length > 0
++            ? errorInfo.data.actualModel
++            : undefined;
++        const fallbackUsed = typeof errorInfo.data?.fallbackUsed === 'boolean' ? errorInfo.data.fallbackUsed : undefined;
+         const recovery = message.info.sessionID
+             ? {
+                 sessionId: message.info.sessionID,
+                 providerID: recoveryProviderID,
+                 modelID: recoveryModelID,
+                 variant: recoveryVariant,
++                actualModel,
++                fallbackUsed,
+             }
+             : undefined;
+         if (errorName === 'SessionRetry') {
+@@ -787,6 +795,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+             providerID={assistantError.recovery.providerID}
+             modelID={assistantError.recovery.modelID}
+             variant={assistantError.recovery.variant}
++            actualModel={assistantError.recovery.actualModel}
++            fallbackUsed={assistantError.recovery.fallbackUsed}
+         />
+     ) : undefined;
+ 
+diff --git a/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx b/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx
+index 0bad6108..ae2e5022 100644
+--- a/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx
++++ b/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx
+@@ -22,6 +22,8 @@ export type FailedTurnRecoveryControlsProps = {
+   providerID?: string;
+   modelID?: string;
+   variant?: string;
++  actualModel?: string;
++  fallbackUsed?: boolean;
+   defaultModelSwitcherOpen?: boolean;
+ };
+ 
+@@ -32,6 +34,8 @@ export const FailedTurnRecoveryControls: React.FC<FailedTurnRecoveryControlsProp
+   providerID,
+   modelID,
+   variant,
++  actualModel,
++  fallbackUsed,
+   defaultModelSwitcherOpen = false,
+ }) => {
+   const providers = useConfigStore((state) => state.providers as RecoveryProvider[]);
+@@ -137,6 +141,14 @@ export const FailedTurnRecoveryControls: React.FC<FailedTurnRecoveryControlsProp
+         </div>
+       ) : null}
+ 
++      {actualModel ? (
++        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
++          <span>Фактическая модель:</span>
++          <code>{actualModel}</code>
++          {fallbackUsed ? <span>(fallback)</span> : null}
++        </div>
++      ) : null}
++
+       <div className="flex flex-wrap gap-2">
+         <Button
+           type="button"
+diff --git a/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx b/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx
+index 299121b2..fb6107de 100644
+--- a/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx
++++ b/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx
+@@ -89,4 +89,43 @@ describe("failed message recovery ui", () => {
+     expect(expanded).toContain("name=\"model\"");
+     expect(expanded).toContain("name=\"variant\"");
+   });
++
++  test("shows the factual model selected by the runtime fallback", () => {
++    const messages = applyRetryOverlay([
++      {
++        info: {
++          id: "user-1",
++          role: "user",
++          sessionID: "session-1",
++          providerID: "omniroute",
++          modelID: "combo",
++          time: { created: 1 },
++        } as never,
++        parts: [],
++      },
++      {
++        info: {
++          id: "assistant-1",
++          role: "assistant",
++          sessionID: "session-1",
++          resilience: {
++            attempt: 1,
++            selectedModel: "omniroute/combo",
++            actualModel: "minimax/MiniMax-M3:512k",
++            fallbackUsed: true,
++          },
++          time: { created: 2 },
++        } as never,
++        parts: [],
++      },
++    ], {
++      sessionId: "session-1",
++      message: "provider failed",
++      fallbackTimestamp: 10,
++    });
++
++    const error = (messages[1]?.info as { error?: { data?: Record<string, unknown> } } | undefined)?.error;
++    expect(error?.data?.actualModel).toBe("minimax/MiniMax-M3:512k");
++    expect(error?.data?.fallbackUsed).toBe(true);
++  });
+ });
+diff --git a/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts b/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts
+index b620c735..8bdaf0a1 100644
+--- a/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts
++++ b/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts
+@@ -41,6 +41,18 @@ const readUserSelection = (message: ChatMessageEntry): { providerID?: string; mo
+     return { providerID, modelID, variant };
+ };
+ 
++const readRuntimeModel = (message: ChatMessageEntry): { actualModel?: string; fallbackUsed?: boolean } => {
++    const resilience = (message.info as {
++        resilience?: { actualModel?: unknown; fallbackUsed?: unknown };
++    }).resilience;
++    return {
++        actualModel: typeof resilience?.actualModel === 'string' && resilience.actualModel.trim().length > 0
++            ? resilience.actualModel
++            : undefined,
++        fallbackUsed: typeof resilience?.fallbackUsed === 'boolean' ? resilience.fallbackUsed : undefined,
++    };
++};
++
+ export const applyRetryOverlay = (
+     messages: ChatMessageEntry[],
+     input: RetryOverlayInput,
+@@ -62,6 +74,10 @@ export const applyRetryOverlay = (
+     }
+ 
+     const lastUserSelection = readUserSelection(messages[lastUserIndex]);
++    const runtimeModel = messages
++        .slice(lastUserIndex + 1)
++        .map(readRuntimeModel)
++        .find((value) => value.actualModel !== undefined);
+     const retryError = {
+         name: 'SessionRetry',
+         message: input.message,
+@@ -70,6 +86,8 @@ export const applyRetryOverlay = (
+             ...(lastUserSelection.providerID ? { providerID: lastUserSelection.providerID } : {}),
+             ...(lastUserSelection.modelID ? { modelID: lastUserSelection.modelID } : {}),
+             ...(lastUserSelection.variant ? { variant: lastUserSelection.variant } : {}),
++            ...(runtimeModel?.actualModel ? { actualModel: runtimeModel.actualModel } : {}),
++            ...(runtimeModel?.fallbackUsed !== undefined ? { fallbackUsed: runtimeModel.fallbackUsed } : {}),
+         },
+     };
+ 
+diff --git a/packages/ui/src/lib/opencode/client.ts b/packages/ui/src/lib/opencode/client.ts
+index 8e35b631..58b0d21c 100644
+--- a/packages/ui/src/lib/opencode/client.ts
++++ b/packages/ui/src/lib/opencode/client.ts
+@@ -973,6 +973,51 @@ class OpencodeService {
+     unwrapSdkOptional(response, 'v2.session.wait');
+   }
+ 
++  async resumeSession(sessionId: string, directory?: string | null): Promise<void> {
++    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
++    const query = requestDirectory ? `?directory=${encodeURIComponent(requestDirectory)}` : '';
++    const response = await runtimeFetch(`/api/session/${encodeURIComponent(sessionId)}/resume${query}`, {
++      method: 'POST',
++      headers: { Accept: 'application/json' },
++    });
++    if (!response.ok) {
++      throw new Error(`v2.session.resume failed (${response.status})`);
++    }
++  }
++
++  async listExperimentalToolIds(directory?: string | null): Promise<string[]> {
++    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
++    const query = requestDirectory ? `?directory=${encodeURIComponent(requestDirectory)}` : '';
++    const response = await runtimeFetch(`/api/experimental/tool/callable-ids${query}`);
++    if (!response.ok) {
++      throw new Error(`experimental.tool.callable-ids failed (${response.status})`);
++    }
++    const payload: unknown = await response.json();
++    if (!Array.isArray(payload) || payload.some((value) => typeof value !== 'string')) {
++      throw new Error('experimental.tool.callable-ids returned an invalid response');
++    }
++    return payload;
++  }
++
++  async callExperimentalTool(input: {
++    sessionId: string;
++    tool: string;
++    arguments: Record<string, unknown>;
++    directory?: string | null;
++  }): Promise<unknown> {
++    const requestDirectory = this.normalizeCandidatePath(input.directory) ?? this.currentDirectory;
++    const query = requestDirectory ? `?directory=${encodeURIComponent(requestDirectory)}` : '';
++    const response = await runtimeFetch(`/api/experimental/tool/call${query}`, {
++      method: 'POST',
++      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ sessionID: input.sessionId, tool: input.tool, arguments: input.arguments }),
++    });
++    if (!response.ok) {
++      throw new Error(`experimental.tool.call failed (${response.status})`);
++    }
++    return response.json();
++  }
++
+   async switchSessionModel(
+     sessionId: string,
+     selection: { providerID: string; modelID: string; variant?: string },
+@@ -1462,6 +1507,28 @@ class OpencodeService {
+     return data;
+   }
+ 
++  async updateResilienceConfig(settings: {
++    responseTimeoutMs: number;
++    toolTimeoutMs: number;
++    retries: number;
++    retryDelayMs: number;
++    autoResume: boolean;
++    fallbackEnabled: boolean;
++    fallbackModelIds: string[];
++  }): Promise<void> {
++    await this.updateConfigPartial((config) => ({
++      ...config,
++      resilience: {
++        responseTimeoutMs: settings.responseTimeoutMs,
++        toolTimeoutMs: settings.toolTimeoutMs,
++        retries: settings.retries,
++        retryDelayMs: settings.retryDelayMs,
++        autoResume: settings.autoResume,
++        fallbackModels: settings.fallbackEnabled ? settings.fallbackModelIds : [],
++      },
++    } as Config));
++  }
++
+   /**
+    * Update config with a partial modification function.
+    * This handles the GET-modify-PATCH pattern required by the upstream API.
+diff --git a/packages/ui/src/lib/opencode/tool-call-client.test.ts b/packages/ui/src/lib/opencode/tool-call-client.test.ts
+index 14e66c97..f9e67efa 100644
+--- a/packages/ui/src/lib/opencode/tool-call-client.test.ts
++++ b/packages/ui/src/lib/opencode/tool-call-client.test.ts
+@@ -6,6 +6,8 @@ let listedAgents: Agent[] = [];
+ let mcpStatusByName: Record<string, { status?: string }> = {};
+ let sessionsById: Record<string, Session> = {};
+ let messagesBySessionId: Record<string, Array<{ info: Message; parts: Part[] }>> = {};
++let experimentalToolIds: string[] = [];
++const experimentalToolCalls: Array<Record<string, unknown>> = [];
+ const sendPlainSessionMessageCalls: Array<{ sessionID: string; directory: string; text: string }> = [];
+ 
+ mock.module('@/stores/useUIStore', () => ({
+@@ -42,6 +44,11 @@ mock.module('@/lib/opencode/client', () => ({
+       return session;
+     }),
+     getSessionMessages: mock(async (sessionID: string) => messagesBySessionId[sessionID] ?? []),
++    listExperimentalToolIds: mock(async () => experimentalToolIds),
++    callExperimentalTool: mock(async (input: Record<string, unknown>) => {
++      experimentalToolCalls.push(input);
++      return { output: 'ok' };
++    }),
+   },
+ }));
+ 
+@@ -66,10 +73,12 @@ describe('tool-call-client', () => {
+     mcpStatusByName = {};
+     sessionsById = {};
+     messagesBySessionId = {};
++    experimentalToolIds = [];
++    experimentalToolCalls.length = 0;
+     sendPlainSessionMessageCalls.length = 0;
+   });
+ 
+-  test('lists runtime-proven Task and MCP discovery entries as visibly unsupported actions', async () => {
++  test('lists runtime-proven Task and MCP discovery entries', async () => {
+     listedAgents = [
+       { name: 'planner', mode: 'subagent' } as Agent,
+       { name: 'reviewer', mode: 'all' } as Agent,
+@@ -87,16 +96,16 @@ describe('tool-call-client', () => {
+       {
+         kind: 'task',
+         id: 'task:planner',
+-        label: 'Task: planner',
+-        supported: false,
+-        unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++        label: 'task:planner',
++        supported: true,
++        statusLabel: 'Available',
+       },
+       {
+         kind: 'task',
+         id: 'task:reviewer',
+-        label: 'Task: reviewer',
+-        supported: false,
+-        unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++        label: 'task:reviewer',
++        supported: true,
++        statusLabel: 'Available',
+       },
+       {
+         kind: 'mcp',
+@@ -117,15 +126,31 @@ describe('tool-call-client', () => {
+     ]);
+   });
+ 
+-  test('rejects discovered direct actions when the runtime lacks a safe invocation contract', async () => {
++  test('calls a discovered Task through the OpenCode direct tool endpoint', async () => {
+     listedAgents = [{ name: 'planner', mode: 'subagent' } as Agent];
++    experimentalToolIds = ['send_message'];
++
++    const actions = await listCallableActions('session-1', '/repo/app');
++    expect(actions.find((action) => action.id === 'task:planner')?.supported).toBe(true);
++    expect(actions.find((action) => action.id === 'mcp:send_message')?.supported).toBe(true);
+ 
+-    await expect(callAction({
+-      sessionId: 'session-child',
++    await callAction({
++      sessionId: 'session-1',
+       actionId: 'task:planner',
+-      arguments: { brief: 'Investigate' },
++      arguments: { prompt: 'Inspect the current changes' },
++      directory: '/repo/app',
++    });
++
++    expect(experimentalToolCalls).toEqual([{
++      sessionId: 'session-1',
++      tool: 'task',
++      arguments: {
++        prompt: 'Inspect the current changes',
++        description: 'task:planner',
++        subagent_type: 'planner',
++      },
+       directory: '/repo/app',
+-    })).rejects.toThrow(DIRECT_ACTION_UNSUPPORTED_MESSAGE);
++    }]);
+   });
+ 
+   test('sends the latest completed child assistant answer to the native parent session', async () => {
+diff --git a/packages/ui/src/lib/opencode/tool-call-client.ts b/packages/ui/src/lib/opencode/tool-call-client.ts
+index 90cb8069..695dafe9 100644
+--- a/packages/ui/src/lib/opencode/tool-call-client.ts
++++ b/packages/ui/src/lib/opencode/tool-call-client.ts
+@@ -34,9 +34,9 @@ const isActionablyVisibleTaskAgent = (agent: Agent): boolean => {
+ const toTaskAction = (agent: Agent): CallableAction => ({
+   kind: 'task',
+   id: `task:${agent.name}`,
+-  label: `Task: ${agent.name}`,
+-  supported: false,
+-  unsupportedReason: DIRECT_ACTION_UNSUPPORTED_MESSAGE,
++  label: `task:${agent.name}`,
++  supported: true,
++  statusLabel: 'Available',
+ });
+ 
+ const isMessageCompleted = (message: Message): boolean => {
+@@ -85,11 +85,28 @@ const getDiscoveredTaskActions = async (directory?: string | null): Promise<Call
+ 
+ export async function listCallableActions(sessionId: string, directory?: string | null): Promise<CallableAction[]> {
+   void sessionId;
+-  const [taskActions, mcpEntries] = await Promise.all([
++  const [taskActions, toolIds] = await Promise.all([
+     getDiscoveredTaskActions(directory),
+-    Promise.resolve(listDiscoveredMcpEntries(useMcpStore.getState().getStatusForDirectory(directory))),
++    opencodeClient.listExperimentalToolIds(directory).catch(() => []),
+   ]);
+ 
++  if (toolIds.length > 0) {
++    return [
++      ...taskActions,
++      ...toolIds
++        .filter((id) => id !== 'task')
++        .map((id) => ({
++          kind: 'mcp' as const,
++          id: `mcp:${id}`,
++          label: `mcp:${id}`,
++          supported: true,
++          statusLabel: 'Available',
++        })),
++    ];
++  }
++
++  const mcpEntries = listDiscoveredMcpEntries(useMcpStore.getState().getStatusForDirectory(directory));
++
+   return [
+     ...taskActions,
+     ...mcpEntries.map((entry) => ({
+@@ -125,7 +142,20 @@ export async function callAction(input: {
+     throw new Error(action.unsupportedReason ?? DIRECT_ACTION_UNSUPPORTED_MESSAGE);
+   }
+ 
+-  throw new Error(DIRECT_ACTION_UNSUPPORTED_MESSAGE);
++  const tool = action.kind === 'task' ? 'task' : action.id.slice('mcp:'.length);
++  const argumentsForCall = action.kind === 'task'
++    ? {
++      ...input.arguments,
++      description: typeof input.arguments.description === 'string' ? input.arguments.description : action.label,
++      subagent_type: action.id.slice('task:'.length),
++    }
++    : input.arguments;
++  await opencodeClient.callExperimentalTool({
++    sessionId: input.sessionId,
++    tool,
++    arguments: argumentsForCall,
++    directory: input.directory,
++  });
+ }
+ 
+ export async function sendLastChildAnswerToParent(childSessionId: string, directory?: string | null): Promise<void> {
+diff --git a/packages/ui/src/stores/useResilienceSettingsStore.test.ts b/packages/ui/src/stores/useResilienceSettingsStore.test.ts
+index 3e8e1010..5de29961 100644
+--- a/packages/ui/src/stores/useResilienceSettingsStore.test.ts
++++ b/packages/ui/src/stores/useResilienceSettingsStore.test.ts
+@@ -33,6 +33,7 @@ const providerModelIdsByDirectory = new Map<string, string[]>();
+ let runtimeFetchImpl: (input: string, init?: RequestInit) => Promise<Response> = async () =>
+   new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
+ let updateDesktopSettingsImpl: (changes: Partial<SettingsPayload>) => Promise<void> = async () => undefined;
++let updateResilienceConfigImpl: (settings: ResilienceSettingsPayload) => Promise<void> = async () => undefined;
+ 
+ const deferred = <T,>() => {
+   let resolve!: (value: T) => void;
+@@ -120,6 +121,7 @@ mock.module('@/lib/opencode/client', () => ({
+   opencodeClient: {
+     setDirectory: mock(() => undefined),
+     getDirectory: mock(() => undefined),
++    updateResilienceConfig: mock(async (settings: ResilienceSettingsPayload) => updateResilienceConfigImpl(settings)),
+     getProvidersForConfig: mock(async (directory?: string | null) => {
+       const ids = providerModelIdsByDirectory.get(directory ?? '') ?? [];
+       return {
+@@ -180,6 +182,7 @@ describe('useResilienceSettingsStore', () => {
+       return responseWithJson(settingsByRuntime.get(getRuntimeKey()) ?? {});
+     };
+     updateDesktopSettingsImpl = async () => undefined;
++    updateResilienceConfigImpl = async () => undefined;
+ 
+     switchRuntimeEndpoint({ apiBaseUrl: 'https://runtime-a.example', runtimeKey: 'runtime-a' });
+ 
+@@ -233,6 +236,34 @@ describe('useResilienceSettingsStore', () => {
+     expect(useResilienceSettingsStore.getState().directory).toBe(DIRECTORY_B);
+   });
+ 
++  test('persists resilience settings into the OpenCode runtime config', async () => {
++    let runtimeSettings: ResilienceSettingsPayload | undefined;
++    updateResilienceConfigImpl = async (settings) => {
++      runtimeSettings = settings;
++    };
++
++    await useResilienceSettingsStore.getState().load(DIRECTORY_A);
++    await useResilienceSettingsStore.getState().save({
++      responseTimeoutMs: 30000,
++      toolTimeoutMs: 45000,
++      retries: 2,
++      retryDelayMs: 1500,
++      autoResume: true,
++      fallbackEnabled: true,
++      fallbackModelIds: ['minimax/MiniMax-M3:512k'],
++    });
++
++    expect(runtimeSettings).toEqual({
++      responseTimeoutMs: 30000,
++      toolTimeoutMs: 45000,
++      retries: 2,
++      retryDelayMs: 1500,
++      autoResume: true,
++      fallbackEnabled: true,
++      fallbackModelIds: ['minimax/MiniMax-M3:512k'],
++    });
++  });
++
+   test('ignores stale load results after a runtime switch', async () => {
+     const runtimeALoad = deferred<Response>();
+     settingsByRuntime.set('runtime-b', {
+diff --git a/packages/ui/src/stores/useResilienceSettingsStore.ts b/packages/ui/src/stores/useResilienceSettingsStore.ts
+index 7555fa88..784b54c6 100644
+--- a/packages/ui/src/stores/useResilienceSettingsStore.ts
++++ b/packages/ui/src/stores/useResilienceSettingsStore.ts
+@@ -344,6 +344,7 @@ export const useResilienceSettingsStore = create<ResilienceSettingsStore>((set,
+     }
+ 
+     try {
++      await opencodeClient.updateResilienceConfig(nextSettings);
+       await updateDesktopSettings(toDesktopSettingsPatch(changedSettings));
+     } finally {
+       if (generation === saveGeneration && runtimeKey === getRuntimeKey()) {
+diff --git a/packages/ui/src/sync/session-recovery-actions.test.ts b/packages/ui/src/sync/session-recovery-actions.test.ts
+index f0305b54..339e2916 100644
+--- a/packages/ui/src/sync/session-recovery-actions.test.ts
++++ b/packages/ui/src/sync/session-recovery-actions.test.ts
+@@ -44,6 +44,9 @@ mock.module("@/lib/opencode/client", () => ({
+     waitForSessionIdle: async (sessionId: string, directory?: string | null) => {
+       operationLog.push({ kind: "wait", sessionId, directory });
+     },
++    resumeSession: async (sessionId: string, directory?: string | null) => {
++      operationLog.push({ kind: "resume", sessionId, directory });
++    },
+     abortSession: async (sessionId: string, directory?: string | null) => {
+       operationLog.push({ kind: "abort", sessionId, directory });
+       return true;
+@@ -137,7 +140,7 @@ describe("session-recovery-actions", () => {
+     seedFailedTurn();
+   });
+ 
+-  test("resume waits for idle and replays the last user prompt through durable session.prompt", async () => {
++  test("resume waits for idle and resumes the durable failed turn without duplicating its user prompt", async () => {
+     await recoverFailedTurn({ sessionId: "session-1", mode: "resume" });
+ 
+     expect(operationLog).toEqual([
+@@ -153,15 +156,9 @@ describe("session-recovery-actions", () => {
+         directory: "/repo/openchamber",
+       },
+       {
+-        kind: "prompt",
++        kind: "resume",
+         sessionId: "session-1",
+         directory: "/repo/openchamber",
+-        resume: true,
+-        prompt: {
+-          text: "Retry this exact request",
+-          files: [{ uri: "file:///repo/openchamber/notes.md", name: "notes.md" }],
+-          agents: [{ name: "reviewer" }],
+-        },
+       },
+     ]);
+   });
+@@ -237,20 +234,11 @@ describe("session-recovery-actions", () => {
+   });
+ 
+   test("deduplicates concurrent recovery requests for the same session", async () => {
+-    const promptGate: { release?: () => void } = {};
+-    promptImpl = () => new Promise<void>((resolve) => {
+-      promptGate.release = resolve;
+-    });
+-
+     const first = recoverFailedTurn({ sessionId: "session-1", mode: "resume" });
+     const second = recoverFailedTurn({ sessionId: "session-1", mode: "resume" });
+ 
+     await new Promise((resolve) => setTimeout(resolve, 0));
+-    expect(operationLog.filter((entry) => entry.kind === "prompt")).toHaveLength(1);
+-
+-    if (promptGate.release) {
+-      promptGate.release();
+-    }
++    expect(operationLog.filter((entry) => entry.kind === "resume")).toHaveLength(1);
+     await Promise.all([first, second]);
+   });
+ });
+diff --git a/packages/ui/src/sync/session-recovery-actions.ts b/packages/ui/src/sync/session-recovery-actions.ts
+index 3dbf2508..873bdc84 100644
+--- a/packages/ui/src/sync/session-recovery-actions.ts
++++ b/packages/ui/src/sync/session-recovery-actions.ts
+@@ -203,10 +203,15 @@ export const recoverFailedTurn = async (input: RecoverFailedTurnInput): Promise<
+       await switchModelForNextRequest(input.sessionId, selection);
+     }
+ 
++    if (input.mode === "resume") {
++      await opencodeClient.resumeSession(input.sessionId, directory);
++      return;
++    }
++
+     await opencodeClient.promptSession({
+       sessionId: input.sessionId,
+       directory,
+-      ...(input.mode === "restart" ? { id: opencodeClient.createMessageId() } : {}),
++      id: opencodeClient.createMessageId(),
+       resume: true,
+       prompt: recoverableTurn.prompt,
+     });
+-- 
+2.34.1
+

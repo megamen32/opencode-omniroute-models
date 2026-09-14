@@ -1,0 +1,747 @@
+From dd89fc6bcdcbce0f29d73b610a44dd8302d7ef02 Mon Sep 17 00:00:00 2001
+From: roomhacker <roomhacker@bezrabotnyi.com>
+Date: Mon, 27 Jul 2026 18:34:08 +0300
+Subject: [PATCH 1/6] feat: add opt-in subagent workspace
+
+---
+ .superpowers/sdd/task-5-report.md             |  58 ++++
+ .../ui/src/components/chat/ChatContainer.tsx  |  59 ++++
+ .../sections/openchamber/OpenChamberPage.tsx  |   2 +
+ .../openchamber/OpenChamberVisualSettings.tsx |  25 +-
+ .../session/SubagentWorkspaceStrip.tsx        | 291 ++++++++++++++++++
+ .../__tests__/SubagentWorkspaceStrip.test.tsx |  91 ++++++
+ .../useSubagentWorkspaceSettingsStore.ts      |  41 +++
+ packages/ui/src/sync/session-actions.ts       |   6 +-
+ 8 files changed, 571 insertions(+), 2 deletions(-)
+ create mode 100644 .superpowers/sdd/task-5-report.md
+ create mode 100644 packages/ui/src/components/session/SubagentWorkspaceStrip.tsx
+ create mode 100644 packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx
+ create mode 100644 packages/ui/src/stores/useSubagentWorkspaceSettingsStore.ts
+
+diff --git a/.superpowers/sdd/task-5-report.md b/.superpowers/sdd/task-5-report.md
+new file mode 100644
+index 00000000..eb7f951f
+--- /dev/null
++++ b/.superpowers/sdd/task-5-report.md
+@@ -0,0 +1,58 @@
++# Task 5 Report: Opt-in subagent presentation and horizontal workspace
++
++Date: 2026-07-27
++
++Scope executed from the brief at `/home/roomhacker/agents-projects/apps/forks/openchamber/.superpowers/sdd/task-5-brief.md`.
++
++## Outcome
++
++Implemented the Task 5 slice inside the OpenChamber fork only:
++
++- added a persisted subagent-workspace settings store with opt-ins `autoOpenSubagents` and `horizontalSubagentChats`, both defaulting to `false`
++- added a horizontal subagent workspace strip that derives direct child sessions from the existing live child/session topology and uses the existing session/message/status stores for previews
++- gated child-session auto-open so locally created subagent sessions no longer steal focus unless the opt-in is enabled
++- wired both opt-ins into Chat settings
++
++## Files changed
++
++- Added `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useSubagentWorkspaceSettingsStore.ts`
++- Added `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx`
++- Added `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx`
++- Modified `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/ChatContainer.tsx`
++- Modified `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx`
++- Modified `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/sections/openchamber/OpenChamberVisualSettings.tsx`
++- Modified `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/sync/session-actions.ts`
++
++## Focused test evidence
++
++Command:
++
++- `bun test /home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx`
++
++Result:
++
++- PASS
++- 4 tests passed
++- verified defaults, auto-open gating, child-id cleanup, and horizontal scroll input mapping
++
++## UI type-check evidence
++
++Command:
++
++- `bun run type-check:ui`
++
++Result:
++
++- FAIL before Task 5 files were reported by TypeScript
++- first blocking error:
++  - `src/stores/useResilienceSettingsStore.test.ts(168,82): error TS2307: Cannot find module './useResilienceSettingsStore' or its corresponding type declarations.`
++
++Notes:
++
++- `packages/ui/src/stores/useResilienceSettingsStore.ts` and `packages/ui/src/stores/useResilienceSettingsStore.test.ts` were already present as unrelated dirty worktree files and were left untouched
++- because the compiler stops on that unrelated missing-module failure, UI-wide type-check could not be used to prove or disprove additional downstream Task 5 type issues
++
++## Concerns
++
++- UI-wide TypeScript validation is currently blocked by unrelated dirty-worktree resilience-store files.
++- New Task 5 labels were wired in English only; if this settings area needs full locale coverage, the i18n message catalogs should be extended in a follow-up.
+diff --git a/packages/ui/src/components/chat/ChatContainer.tsx b/packages/ui/src/components/chat/ChatContainer.tsx
+index 5af4cd64..94c5536a 100644
+--- a/packages/ui/src/components/chat/ChatContainer.tsx
++++ b/packages/ui/src/components/chat/ChatContainer.tsx
+@@ -29,6 +29,8 @@ import { OverlayScrollbar } from '@/components/ui/OverlayScrollbar';
+ import { Icon } from "@/components/icon/Icon";
+ import { cn, formatDirectoryName } from '@/lib/utils';
+ import { useProjectsStore } from '@/stores/useProjectsStore';
++import { SubagentWorkspaceStrip, getDirectChildSessions, pickAutoOpenSubagentSession, reconcileKnownChildSessionIds } from '@/components/session/SubagentWorkspaceStrip';
++import { useSubagentWorkspaceSettingsStore } from '@/stores/useSubagentWorkspaceSettingsStore';
+ 
+ // New sync system imports
+ import { useSessionUIStore } from '@/sync/session-ui-store';
+@@ -44,6 +46,7 @@ import {
+     useScopedBlockingQuestions,
+     useParentSession,
+     useSession,
++    useAllLiveSessions,
+ } from '@/sync/sync-context';
+ import { useSync } from '@/sync/use-sync';
+ import { usePlanDetection } from '@/hooks/usePlanDetection';
+@@ -559,6 +562,8 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+     const allowPromptingSubagentSessions = useUIStore((state) => state.allowPromptingSubagentSessions);
+     const isTimelineDialogOpen = useUIStore((s) => s.isTimelineDialogOpen);
+     const setTimelineDialogOpen = useUIStore((s) => s.setTimelineDialogOpen);
++    const autoOpenSubagents = useSubagentWorkspaceSettingsStore((state) => state.autoOpenSubagents);
++    const horizontalSubagentChats = useSubagentWorkspaceSettingsStore((state) => state.horizontalSubagentChats);
+ 
+     // Streaming state
+     const streamingMessageId = useStreamingStore(
+@@ -683,6 +688,26 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+     const messageListRef = React.useRef<MessageListHandle | null>(null);
+     const currentSession = useSession(currentSessionId, effectiveSessionDirectory);
+     const parentSession = useParentSession(currentSessionId, effectiveSessionDirectory);
++    const allLiveSessions = useAllLiveSessions();
++    const directChildSessions = React.useMemo(
++        () => getDirectChildSessions(allLiveSessions, currentSessionId),
++        [allLiveSessions, currentSessionId],
++    );
++    const workspaceAnchorSessionId = parentSession?.id ?? currentSessionId;
++    const openWorkspaceSession = React.useCallback((sessionId: string, directoryHint?: string | null) => {
++        setCurrentSession(sessionId, directoryHint ?? null);
++    }, [setCurrentSession]);
++    const workspaceStrip = horizontalSubagentChats && workspaceAnchorSessionId
++        ? (
++            <SubagentWorkspaceStrip
++                anchorSessionId={workspaceAnchorSessionId}
++                activeSessionId={currentSessionId}
++                onOpenSession={openWorkspaceSession}
++            />
++        )
++        : null;
++    const knownChildSessionIdsRef = React.useRef<Set<string>>(new Set());
++    const trackedParentSessionIdRef = React.useRef<string | null>(null);
+ 
+     // In the embedded session-chat iframe, hide "Return to parent" when
+     // viewing the panel's anchor session (the one recorded in the URL). Going
+@@ -761,6 +786,36 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+         }
+     }, [autoOpenDraft, currentSessionId, draftOpen, openNewSessionDraft]);
+ 
++    React.useEffect(() => {
++        const cleanedKnownIds = reconcileKnownChildSessionIds(knownChildSessionIdsRef.current, directChildSessions);
++
++        if (trackedParentSessionIdRef.current !== currentSessionId || !autoOpenSubagents) {
++            knownChildSessionIdsRef.current = new Set(directChildSessions.map((session) => session.id));
++            trackedParentSessionIdRef.current = currentSessionId;
++            return;
++        }
++
++        trackedParentSessionIdRef.current = currentSessionId;
++        const sessionToOpen = pickAutoOpenSubagentSession({
++            autoOpenSubagents,
++            activeSessionId: currentSessionId,
++            directChildSessions,
++            knownChildSessionIds: cleanedKnownIds,
++        });
++
++        if (!sessionToOpen) {
++            knownChildSessionIdsRef.current = cleanedKnownIds;
++            return;
++        }
++
++        cleanedKnownIds.add(sessionToOpen.id);
++        knownChildSessionIdsRef.current = cleanedKnownIds;
++        const directoryHint = useSessionUIStore.getState().getDirectoryForSession(sessionToOpen.id)
++            ?? (sessionToOpen as Session & { directory?: string | null }).directory
++            ?? null;
++        setCurrentSession(sessionToOpen.id, directoryHint);
++    }, [autoOpenSubagents, currentSessionId, directChildSessions, setCurrentSession]);
++
+     const activeTurnChangeRef = React.useRef<(turnId: string | null) => void>(() => {});
+     const handleActiveTurnChange = React.useCallback((turnId: string | null) => {
+         activeTurnChangeRef.current(turnId);
+@@ -1025,6 +1080,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+ 			return (
+ 				<div data-composer-bound className="relative flex h-full flex-col bg-background">
+ 					{returnToParentButton}
++                    {workspaceStrip}
+ 					<div className="flex min-h-0 flex-1 items-center justify-center px-6">
+ 						<div className="max-w-sm text-center">
+ 							<div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--status-error)_10%,transparent)] text-[var(--status-error)]">
+@@ -1046,6 +1102,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+ 		return (
+ 			<div data-composer-bound className="relative flex flex-col h-full bg-background">
+ 				{returnToParentButton}
++                {workspaceStrip}
+ 				<div
+ 					className={cn(
+ 						'relative min-h-0',
+@@ -1104,6 +1161,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+ 			// draft branch above.
+ 			<div data-composer-bound className="relative flex flex-col h-full bg-background">
+ 				{returnToParentButton}
++                {workspaceStrip}
+ 				<div
+ 					className={cn(
+                         'relative min-h-0',
+@@ -1136,6 +1194,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
+ 	return (
+ 		<div data-composer-bound className="relative flex flex-col h-full bg-background">
+ 			{returnToParentButton}
++            {workspaceStrip}
+ 			<ChatViewport
+ 				currentSessionId={currentSessionId}
+                 isDesktopExpandedInput={isDesktopExpandedInput}
+diff --git a/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx b/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx
+index ebae3dc5..d552495c 100644
+--- a/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx
++++ b/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx
+@@ -199,6 +199,8 @@ const ChatSectionContent: React.FC = () => {
+                 'codeBlockLineWrap',
+                 'splitAssistantMessageActions',
+                 'subagentReadOnlyBanner',
++                'autoOpenSubagents',
++                'horizontalSubagentChats',
+                 'diffLayout',
+                 'dotfiles',
+                 'fileViewerPreview',
+diff --git a/packages/ui/src/components/sections/openchamber/OpenChamberVisualSettings.tsx b/packages/ui/src/components/sections/openchamber/OpenChamberVisualSettings.tsx
+index c28f2b70..20101205 100644
+--- a/packages/ui/src/components/sections/openchamber/OpenChamberVisualSettings.tsx
++++ b/packages/ui/src/components/sections/openchamber/OpenChamberVisualSettings.tsx
+@@ -5,6 +5,7 @@ import { useThemeSystem } from '@/contexts/useThemeSystem';
+ import type { ThemeMode } from '@/types/theme';
+ import { useUIStore } from '@/stores/useUIStore';
+ import { useMessageQueueStore, type FollowUpBehavior } from '@/stores/messageQueueStore';
++import { useSubagentWorkspaceSettingsStore } from '@/stores/useSubagentWorkspaceSettingsStore';
+ import { cn } from '@/lib/utils';
+ import { Button } from '@/components/ui/button';
+ import { NumberInput } from '@/components/ui/number-input';
+@@ -278,7 +279,7 @@ const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain'
+     return mode === 'markdown' ? 'markdown' : 'plain';
+ };
+ 
+-type VisibleSetting = 'sessionAssist' | 'sessionGoal' | 'theme' | 'windowControlsPosition' | 'pwaInstallName' | 'pwaOrientation' | 'mobileKeyboardMode' | 'timeFormat' | 'weekStart' | 'fontSize' | 'terminalFontSize' | 'terminalShell' | 'terminalLoginShell' | 'editorFontSize' | 'spacing' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'messageTransport' | 'activityRenderMode' | 'collapsibleUserMessages' | 'stickyUserHeader' | 'promptNavigatorEnabled' | 'wideChatLayout' | 'codeBlockLineWrap' | 'splitAssistantMessageActions' | 'subagentReadOnlyBanner' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'fileViewerPreview' | 'reasoning' | 'showToolFileIcons' | 'showTurnChangedFiles' | 'expandedTools' | 'followUpBehavior' | 'terminalQuickKeys' | 'fileEditorKeymap' | 'persistDraft' | 'inputSpellcheck' | 'reportUsage' | 'expandedEditorToolbar';
++type VisibleSetting = 'sessionAssist' | 'sessionGoal' | 'theme' | 'windowControlsPosition' | 'pwaInstallName' | 'pwaOrientation' | 'mobileKeyboardMode' | 'timeFormat' | 'weekStart' | 'fontSize' | 'terminalFontSize' | 'terminalShell' | 'terminalLoginShell' | 'editorFontSize' | 'spacing' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'messageTransport' | 'activityRenderMode' | 'collapsibleUserMessages' | 'stickyUserHeader' | 'promptNavigatorEnabled' | 'wideChatLayout' | 'codeBlockLineWrap' | 'splitAssistantMessageActions' | 'subagentReadOnlyBanner' | 'autoOpenSubagents' | 'horizontalSubagentChats' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'fileViewerPreview' | 'reasoning' | 'showToolFileIcons' | 'showTurnChangedFiles' | 'expandedTools' | 'followUpBehavior' | 'terminalQuickKeys' | 'fileEditorKeymap' | 'persistDraft' | 'inputSpellcheck' | 'reportUsage' | 'expandedEditorToolbar';
+ 
+ const WINDOW_CONTROLS_POSITION_OPTIONS: Array<{ id: DesktopWindowControlsPosition; labelKey: string }> = [
+     { id: 'left', labelKey: 'settings.openchamber.desktopNetwork.option.windowControlsLeft' },
+@@ -380,6 +381,10 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
+     const setShowSplitAssistantMessageActions = useUIStore(state => state.setShowSplitAssistantMessageActions);
+     const allowPromptingSubagentSessions = useUIStore(state => state.allowPromptingSubagentSessions);
+     const setAllowPromptingSubagentSessions = useUIStore(state => state.setAllowPromptingSubagentSessions);
++    const autoOpenSubagents = useSubagentWorkspaceSettingsStore(state => state.autoOpenSubagents);
++    const setAutoOpenSubagents = useSubagentWorkspaceSettingsStore(state => state.setAutoOpenSubagents);
++    const horizontalSubagentChats = useSubagentWorkspaceSettingsStore(state => state.horizontalSubagentChats);
++    const setHorizontalSubagentChats = useSubagentWorkspaceSettingsStore(state => state.setHorizontalSubagentChats);
+     const draftStartersVisible = useUIStore(state => state.draftStartersVisible);
+     const setDraftStartersVisible = useUIStore(state => state.setDraftStartersVisible);
+     const messageStreamTransport = useConfigStore((state) => state.settingsMessageStreamTransport);
+@@ -1811,6 +1816,24 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
+                                                 settingsItem="chat.subagent-read-only-banner"
+                                             />
+                                         )}
++                                        {shouldShow('autoOpenSubagents') && (
++                                            <SettingsCheckboxRow
++                                                checked={autoOpenSubagents}
++                                                onChange={setAutoOpenSubagents}
++                                                label="Auto-open new subagent sessions"
++                                                ariaLabel="Auto-open new subagent sessions"
++                                                settingsItem="chat.auto-open-subagents"
++                                            />
++                                        )}
++                                        {shouldShow('horizontalSubagentChats') && (
++                                            <SettingsCheckboxRow
++                                                checked={horizontalSubagentChats}
++                                                onChange={setHorizontalSubagentChats}
++                                                label="Show horizontal subagent workspace"
++                                                ariaLabel="Show horizontal subagent workspace"
++                                                settingsItem="chat.horizontal-subagent-workspace"
++                                            />
++                                        )}
+                                 </SettingsSection>
+                                 {/* The goal loop runs in the web server — VS Code only renders
+                                     goal state, so the settings section is hidden there too. */}
+diff --git a/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx b/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx
+new file mode 100644
+index 00000000..4bb25937
+--- /dev/null
++++ b/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx
+@@ -0,0 +1,291 @@
++import React from 'react';
++import type { Message, Part, Session } from '@opencode-ai/sdk/v2';
++
++import { useSessionUIStore } from '@/sync/session-ui-store';
++import { useAllLiveSessions, useSessionMessageRecords, useSessionStatus } from '@/sync/sync-context';
++import { cn, formatDirectoryName } from '@/lib/utils';
++import { Icon } from '@/components/icon/Icon';
++
++const WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP = 320;
++
++type WorkspaceStripScrollInput = {
++  key?: string;
++  deltaX?: number;
++  deltaY?: number;
++  shiftKey?: boolean;
++};
++
++type PickAutoOpenSubagentSessionInput = {
++  autoOpenSubagents: boolean;
++  activeSessionId: string | null;
++  directChildSessions: Session[];
++  knownChildSessionIds: Set<string>;
++};
++
++const getSessionUpdatedAt = (session: Session): number => {
++  const updatedAt = session.time?.updated;
++  if (typeof updatedAt === 'number' && Number.isFinite(updatedAt)) {
++    return updatedAt;
++  }
++
++  const createdAt = session.time?.created;
++  return typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0;
++};
++
++const compareSessionsByRecency = (left: Session, right: Session): number => {
++  const delta = getSessionUpdatedAt(right) - getSessionUpdatedAt(left);
++  if (delta !== 0) {
++    return delta;
++  }
++  return left.id.localeCompare(right.id);
++};
++
++const getDirectChildSessions = (sessions: Session[], parentSessionId: string | null): Session[] => {
++  if (!parentSessionId) {
++    return [];
++  }
++
++  return sessions
++    .filter((session) => (session as Session & { parentID?: string | null }).parentID === parentSessionId)
++    .sort(compareSessionsByRecency);
++};
++
++/**
++ * Retains only child ids that still exist in the current direct-child snapshot.
++ */
++export const reconcileKnownChildSessionIds = (
++  knownChildSessionIds: Iterable<string>,
++  directChildSessions: Session[],
++): Set<string> => {
++  const liveIds = new Set(directChildSessions.map((session) => session.id));
++  const next = new Set<string>();
++  for (const sessionId of knownChildSessionIds) {
++    if (liveIds.has(sessionId)) {
++      next.add(sessionId);
++    }
++  }
++  return next;
++};
++
++/**
++ * Chooses the newest unseen direct child session when subagent auto-open is enabled.
++ */
++export const pickAutoOpenSubagentSession = ({
++  autoOpenSubagents,
++  activeSessionId,
++  directChildSessions,
++  knownChildSessionIds,
++}: PickAutoOpenSubagentSessionInput): Session | null => {
++  if (!autoOpenSubagents || !activeSessionId) {
++    return null;
++  }
++
++  for (const session of directChildSessions) {
++    if (!knownChildSessionIds.has(session.id)) {
++      return session;
++    }
++  }
++
++  return null;
++};
++
++/**
++ * Normalizes keyboard and wheel input into a single horizontal scroll delta.
++ */
++export const getWorkspaceStripScrollDelta = (input: WorkspaceStripScrollInput): number | null => {
++  if (input.key === 'ArrowRight') {
++    return WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP;
++  }
++  if (input.key === 'ArrowLeft') {
++    return -WORKSPACE_STRIP_KEYBOARD_SCROLL_STEP;
++  }
++
++  const deltaX = typeof input.deltaX === 'number' ? input.deltaX : 0;
++  const deltaY = typeof input.deltaY === 'number' ? input.deltaY : 0;
++  if (deltaX !== 0) {
++    return deltaX;
++  }
++  if (input.shiftKey && deltaY !== 0) {
++    return deltaY;
++  }
++  return null;
++};
++
++const getSessionDirectoryLabel = (session: Session, fallbackDirectory: string | null): string | null => {
++  const directory = (session as Session & { directory?: string | null }).directory ?? fallbackDirectory ?? null;
++  if (!directory) {
++    return null;
++  }
++  return formatDirectoryName(directory);
++};
++
++const getMessageText = (parts: Part[]): string => {
++  let text = '';
++  for (const part of parts) {
++    if (part.type !== 'text') {
++      continue;
++    }
++    const partText = (part as Part & { text?: string }).text;
++    if (typeof partText === 'string' && partText.trim().length > 0) {
++      text += partText.trim();
++      if (text.length >= 180) {
++        break;
++      }
++      text += ' ';
++    }
++  }
++
++  return text.trim();
++};
++
++const getLatestPreviewText = (messages: Array<{ info: Message; parts: Part[] }>): string => {
++  for (let index = messages.length - 1; index >= 0; index -= 1) {
++    const text = getMessageText(messages[index].parts);
++    if (text.length > 0) {
++      return text;
++    }
++  }
++  return 'Waiting for activity…';
++};
++
++type SubagentWorkspaceStripProps = {
++  anchorSessionId: string;
++  activeSessionId: string | null;
++  onOpenSession: (sessionId: string, directoryHint?: string | null) => void;
++};
++
++type SubagentWorkspaceCardProps = {
++  session: Session;
++  active: boolean;
++  onOpenSession: (sessionId: string, directoryHint?: string | null) => void;
++};
++
++const SubagentWorkspaceCard: React.FC<SubagentWorkspaceCardProps> = ({ session, active, onOpenSession }) => {
++  const fallbackDirectory = useSessionUIStore((state) => state.getDirectoryForSession(session.id));
++  const previewDirectory = fallbackDirectory ?? (session as Session & { directory?: string | null }).directory ?? undefined;
++  const messageRecords = useSessionMessageRecords(session.id, previewDirectory, { enabled: true });
++  const status = useSessionStatus(session.id, previewDirectory);
++  const previewText = React.useMemo(() => getLatestPreviewText(messageRecords), [messageRecords]);
++  const directoryLabel = React.useMemo(() => getSessionDirectoryLabel(session, fallbackDirectory), [fallbackDirectory, session]);
++
++  const statusLabel = status?.type === 'retry'
++    ? 'Retrying'
++    : status?.type === 'busy'
++      ? 'Running'
++      : 'Idle';
++
++  return (
++    <button
++      type="button"
++      onClick={() => onOpenSession(session.id, fallbackDirectory)}
++      className={cn(
++        'flex h-full min-w-[18rem] max-w-[22rem] flex-col rounded-xl border p-3 text-left transition-colors',
++        active
++          ? 'border-[var(--status-info)] bg-[color-mix(in_srgb,var(--status-info)_10%,var(--surface-background))]'
++          : 'border-[var(--surface-border)] bg-[var(--surface-background)] hover:border-[var(--status-info)]/50 hover:bg-[var(--surface-background)]/95',
++      )}
++    >
++      <div className="flex items-start justify-between gap-3">
++        <div className="min-w-0">
++          <p className="truncate text-sm font-medium text-foreground">{session.title?.trim() || 'Subagent session'}</p>
++          {directoryLabel ? (
++            <p className="truncate text-xs text-muted-foreground">{directoryLabel}</p>
++          ) : null}
++        </div>
++        <span className="inline-flex items-center gap-1 rounded-full bg-[var(--surface-background)]/80 px-2 py-1 text-[11px] text-muted-foreground">
++          {status?.type === 'busy' || status?.type === 'retry' ? (
++            <Icon name="loader-4" className="size-3 animate-spin" />
++          ) : (
++            <Icon name="chat-1" className="size-3" />
++          )}
++          {statusLabel}
++        </span>
++      </div>
++      <p className="mt-3 line-clamp-4 text-sm text-muted-foreground">{previewText}</p>
++    </button>
++  );
++};
++
++/**
++ * Horizontally scrollable strip of direct child sessions for the current task subtree.
++ */
++export const SubagentWorkspaceStrip: React.FC<SubagentWorkspaceStripProps> = ({
++  anchorSessionId,
++  activeSessionId,
++  onOpenSession,
++}) => {
++  const scrollRef = React.useRef<HTMLDivElement | null>(null);
++  const sessions = useAllLiveSessions();
++  const childSessions = React.useMemo(
++    () => getDirectChildSessions(sessions, anchorSessionId),
++    [anchorSessionId, sessions],
++  );
++
++  const handleScrollInput = React.useCallback((delta: number | null) => {
++    if (!delta) {
++      return;
++    }
++    const container = scrollRef.current;
++    if (!container) {
++      return;
++    }
++    container.scrollLeft += delta;
++  }, []);
++
++  const handleKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
++    const delta = getWorkspaceStripScrollDelta({ key: event.key });
++    if (!delta) {
++      return;
++    }
++    event.preventDefault();
++    handleScrollInput(delta);
++  }, [handleScrollInput]);
++
++  const handleWheel = React.useCallback((event: React.WheelEvent<HTMLDivElement>) => {
++    const delta = getWorkspaceStripScrollDelta({
++      deltaX: event.deltaX,
++      deltaY: event.deltaY,
++      shiftKey: event.shiftKey,
++    });
++    if (!delta) {
++      return;
++    }
++    event.preventDefault();
++    handleScrollInput(delta);
++  }, [handleScrollInput]);
++
++  if (childSessions.length === 0) {
++    return null;
++  }
++
++  return (
++    <section className="border-b border-[var(--surface-border)] bg-background/95 px-3 py-3" data-subagent-workspace-strip>
++      <div className="mb-2 flex items-center justify-between gap-2">
++        <div>
++          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Subagent workspace</p>
++          <p className="text-xs text-muted-foreground">Direct child sessions stay one swipe or arrow-key away.</p>
++        </div>
++        <span className="text-xs text-muted-foreground">{childSessions.length}</span>
++      </div>
++      <div
++        ref={scrollRef}
++        tabIndex={0}
++        onKeyDown={handleKeyDown}
++        onWheel={handleWheel}
++        className="flex gap-3 overflow-x-auto overflow-y-hidden pb-1 outline-none"
++        aria-label="Subagent workspace strip"
++      >
++        {childSessions.map((session) => (
++          <SubagentWorkspaceCard
++            key={session.id}
++            session={session}
++            active={activeSessionId === session.id}
++            onOpenSession={onOpenSession}
++          />
++        ))}
++      </div>
++    </section>
++  );
++};
++
++export { getDirectChildSessions };
+diff --git a/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx b/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx
+new file mode 100644
+index 00000000..af87af65
+--- /dev/null
++++ b/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx
+@@ -0,0 +1,91 @@
++import { describe, expect, test } from 'bun:test';
++import type { Session } from '@opencode-ai/sdk/v2';
++
++const loadSubagentWorkspaceModule = async () => (
++  import('../SubagentWorkspaceStrip').catch(() => null)
++);
++
++const loadSubagentWorkspaceSettingsStoreModule = async () => (
++  import('@/stores/useSubagentWorkspaceSettingsStore').catch(() => null)
++);
++
++const session = (id: string, options: { parentID?: string | null; updated?: number; directory?: string | null } = {}): Session => ({
++  id,
++  title: id,
++  parentID: options.parentID ?? undefined,
++  time: {
++    created: options.updated ?? 0,
++    updated: options.updated ?? 0,
++  },
++  directory: options.directory ?? '/workspace',
++} as Session);
++
++describe('useSubagentWorkspaceSettingsStore', () => {
++  test('defaults both opt-ins to false', async () => {
++    const module = await loadSubagentWorkspaceSettingsStoreModule();
++
++    expect(module).not.toBeNull();
++    expect(module?.useSubagentWorkspaceSettingsStore.getState().autoOpenSubagents).toBe(false);
++    expect(module?.useSubagentWorkspaceSettingsStore.getState().horizontalSubagentChats).toBe(false);
++  });
++});
++
++describe('SubagentWorkspaceStrip helpers', () => {
++  test('auto-opens only brand-new direct child sessions', async () => {
++    const module = await loadSubagentWorkspaceModule();
++
++    expect(module).not.toBeNull();
++
++    const firstChildren = [
++      session('child-old', { parentID: 'parent', updated: 10 }),
++      session('child-new', { parentID: 'parent', updated: 20 }),
++    ];
++
++    expect(module?.pickAutoOpenSubagentSession({
++      autoOpenSubagents: false,
++      activeSessionId: 'parent',
++      directChildSessions: firstChildren,
++      knownChildSessionIds: new Set<string>(),
++    })?.id ?? null).toBe(null);
++
++    expect(module?.pickAutoOpenSubagentSession({
++      autoOpenSubagents: true,
++      activeSessionId: 'parent',
++      directChildSessions: firstChildren,
++      knownChildSessionIds: new Set<string>(['child-old']),
++    })?.id ?? null).toBe('child-new');
++  });
++
++  test('cleans up vanished child ids before detecting a re-created child', async () => {
++    const module = await loadSubagentWorkspaceModule();
++
++    expect(module).not.toBeNull();
++
++    const knownIds = module?.reconcileKnownChildSessionIds(
++      new Set<string>(['child-a', 'child-b']),
++      [session('child-b', { parentID: 'parent', updated: 5 })],
++    );
++
++    expect([...((knownIds ?? new Set<string>()))]).toEqual(['child-b']);
++
++    expect(module?.pickAutoOpenSubagentSession({
++      autoOpenSubagents: true,
++      activeSessionId: 'parent',
++      directChildSessions: [
++        session('child-a', { parentID: 'parent', updated: 100 }),
++        session('child-b', { parentID: 'parent', updated: 50 }),
++      ],
++      knownChildSessionIds: knownIds ?? new Set<string>(),
++    })?.id ?? null).toBe('child-a');
++  });
++
++  test('maps keyboard and trackpad input into horizontal strip scrolling', async () => {
++    const module = await loadSubagentWorkspaceModule();
++
++    expect(module).not.toBeNull();
++    expect(module?.getWorkspaceStripScrollDelta({ key: 'ArrowRight' }) ?? null).toBeGreaterThan(0);
++    expect(module?.getWorkspaceStripScrollDelta({ key: 'ArrowLeft' }) ?? null).toBeLessThan(0);
++    expect(module?.getWorkspaceStripScrollDelta({ deltaX: 48, deltaY: 5 }) ?? null).toBe(48);
++    expect(module?.getWorkspaceStripScrollDelta({ deltaX: 0, deltaY: 36, shiftKey: true }) ?? null).toBe(36);
++  });
++});
+diff --git a/packages/ui/src/stores/useSubagentWorkspaceSettingsStore.ts b/packages/ui/src/stores/useSubagentWorkspaceSettingsStore.ts
+new file mode 100644
+index 00000000..61b109e4
+--- /dev/null
++++ b/packages/ui/src/stores/useSubagentWorkspaceSettingsStore.ts
+@@ -0,0 +1,41 @@
++import { create } from 'zustand';
++import { devtools, persist } from 'zustand/middleware';
++
++import { createDeferredSafeJSONStorage } from './utils/safeStorage';
++
++type SubagentWorkspaceSettingsState = {
++  autoOpenSubagents: boolean;
++  horizontalSubagentChats: boolean;
++  setAutoOpenSubagents: (value: boolean) => void;
++  setHorizontalSubagentChats: (value: boolean) => void;
++};
++
++/**
++ * Stores user opt-ins for subagent-specific chat presentation.
++ */
++export const useSubagentWorkspaceSettingsStore = create<SubagentWorkspaceSettingsState>()(
++  devtools(
++    persist(
++      (set) => ({
++        autoOpenSubagents: false,
++        horizontalSubagentChats: false,
++        setAutoOpenSubagents: (value: boolean) => {
++          set({ autoOpenSubagents: value });
++        },
++        setHorizontalSubagentChats: (value: boolean) => {
++          set({ horizontalSubagentChats: value });
++        },
++      }),
++      {
++        name: 'openchamber-subagent-workspace-settings',
++        version: 1,
++        storage: createDeferredSafeJSONStorage(),
++        partialize: (state) => ({
++          autoOpenSubagents: state.autoOpenSubagents,
++          horizontalSubagentChats: state.horizontalSubagentChats,
++        }),
++      },
++    ),
++    { name: 'SubagentWorkspaceSettingsStore' },
++  ),
++);
+diff --git a/packages/ui/src/sync/session-actions.ts b/packages/ui/src/sync/session-actions.ts
+index 94324037..7f505672 100644
+--- a/packages/ui/src/sync/session-actions.ts
++++ b/packages/ui/src/sync/session-actions.ts
+@@ -28,6 +28,7 @@ import { withContextObligatoryMessage, type ContextObligatoryMessage } from "@/l
+ import { getImperativeSessionMessageLoader } from "./session-message-loader"
+ import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
+ import { getRuntimeKey } from "@/lib/runtime-switch"
++import { useSubagentWorkspaceSettingsStore } from "@/stores/useSubagentWorkspaceSettingsStore"
+ 
+ const MESSAGE_REFETCH_LIMIT = 100
+ const SEND_CONFIRMATION_REFETCH_LIMIT = 30
+@@ -644,7 +645,10 @@ export async function createSession(
+     if (sessionDirectory) {
+       registerSessionDirectory(session.id, sessionDirectory)
+     }
+-    useSessionUIStore.getState().setCurrentSession(session.id, sessionDirectory)
++    const shouldAutoOpenCreatedSession = !parentID || useSubagentWorkspaceSettingsStore.getState().autoOpenSubagents
++    if (shouldAutoOpenCreatedSession) {
++      useSessionUIStore.getState().setCurrentSession(session.id, sessionDirectory)
++    }
+     useSessionUIStore.getState().markSessionAsOpenChamberCreated(session.id)
+     useGlobalSessionsStore.getState().upsertSession(session)
+     return session
+-- 
+2.34.1

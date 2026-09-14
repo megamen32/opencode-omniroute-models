@@ -72,7 +72,7 @@ export function normalizeCatalogModel(model) {
  * Project live catalog facts into the OpenCode provider-model schema.
  *
  * @param {Record<string, unknown>} model normalized or raw catalog model
- * @returns {{limit: Record<string, number>, modalities: {input: string[], output: string[]}}} metadata
+ * @returns {{limit?: Record<string, number>, modalities: {input: string[], output: string[]}}} metadata
  */
 export function toOpenCodeModelMetadata(model) {
   const normalized = normalizeCatalogModel(model)
@@ -84,7 +84,7 @@ export function toOpenCodeModelMetadata(model) {
   if (input !== undefined) limit.input = input
   if (output !== undefined) limit.output = output
   return {
-    limit,
+    ...(Object.keys(limit).length > 0 ? { limit } : {}),
     modalities: {
       input: normalized.input_modalities,
       output: normalized.output_modalities,

@@ -1,0 +1,1347 @@
+From 09e071243bf2d22e5ecb9fa588cbd65c3fd9178f Mon Sep 17 00:00:00 2001
+From: roomhacker <roomhacker@bezrabotnyi.com>
+Date: Mon, 27 Jul 2026 19:00:31 +0300
+Subject: [PATCH 4/6] feat: add failed-turn recovery controls
+
+---
+ .../2026-07-27-resilient-chat-controls.md     | 153 +++++++++++
+ .../ui/src/components/chat/ChatMessage.tsx    |  44 ++-
+ .../chat/FailedTurnRecoveryControls.tsx       | 253 +++++++++++++++++
+ .../ui/src/components/chat/MessageList.tsx    |  19 +-
+ .../__tests__/failedMessageRecovery.test.tsx  |  92 +++++++
+ .../chat/lib/turns/applyRetryOverlay.ts       |  43 ++-
+ .../components/chat/message/MessageBody.tsx   |   7 +
+ packages/ui/src/lib/opencode/client.ts        |  56 +++-
+ .../src/sync/session-recovery-actions.test.ts | 254 ++++++++++++++++++
+ .../ui/src/sync/session-recovery-actions.ts   | 219 +++++++++++++++
+ 10 files changed, 1124 insertions(+), 16 deletions(-)
+ create mode 100644 docs/superpowers/plans/2026-07-27-resilient-chat-controls.md
+ create mode 100644 packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx
+ create mode 100644 packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx
+ create mode 100644 packages/ui/src/sync/session-recovery-actions.test.ts
+ create mode 100644 packages/ui/src/sync/session-recovery-actions.ts
+
+diff --git a/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md b/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md
+new file mode 100644
+index 00000000..2ac33316
+--- /dev/null
++++ b/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md
+@@ -0,0 +1,153 @@
++# Resilient Chat Controls Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Add reliable recovery controls, next-request model switching, configurable OpenCode resilience, explicit Task/MCP actions, and opt-in subagent workspace controls to the OpenChamber/OpenCode stack.
++
++**Architecture:** OpenChamber owns user-facing state, buttons, menus, and persisted opt-in preferences. OpenCode owns server-side request/tool timeout and retry policy because a browser cannot cancel or time-limit work already running in the server. The UI calls the existing OpenCode `session.switchModel` and `session.prompt(..., resume)` contracts, and uses a small explicit tool-call bridge for operations that OpenCode does not expose as public HTTP endpoints; no second OpenCode server is started.
++
++**Tech Stack:** TypeScript, React, Zustand, OpenCode v2 SDK/generated client, Effect schemas/runtime, Vitest/Bun tests, existing OpenChamber i18n and UI primitives.
++
++## Global Constraints
++
++- Preserve raw provider/model IDs everywhere; model labels used by these controls must remain identifiers such as `minimax/MiniMax-M3:512k`, never humanized names with spaces.
++- Changing the model while a turn is active updates only the next request; it must not mutate the model of an already-running request.
++- Resume/retry must use an explicit message ID or the OpenCode `resume` contract; never blindly repeat an uncertain `promptAsync` transport request that may already be running server-side.
++- Automatic retry is bounded by configured attempts and delay; fallback is opt-in, deterministic, and recorded with the actual provider/model used.
++- If a combo model is selected, displayed context and modalities must be the minimum supported by every member of the combo; actual responding model metadata remains visible in the raw ID form.
++- Settings are scoped to the active OpenCode runtime/directory where the existing persistence layer supports scope; defaults are opt-in unless stated P0.
++- The existing systemd-owned OpenCode server remains the only server; verification must target its configured endpoint and must not launch a competing daemon.
++- Every implementation task starts with a failing focused test, runs the smallest relevant test command, and leaves unrelated dirty files untouched.
++
++---
++
++## Repository and file map
++
++OpenChamber fork (`/home/roomhacker/agents-projects/apps/forks/openchamber`) is the primary UI product. Relevant existing surfaces are `packages/ui/src/components/chat/ChatMessage.tsx`, `ChatInput.tsx`, `ChatContainer.tsx`, `MessageList.tsx`, `packages/ui/src/sync/session-actions.ts`, `packages/ui/src/lib/opencode/client.ts`, `packages/ui/src/stores/useConfigStore.ts`, `useMcpStore.ts`, and the OpenChamber settings/i18n files. The current retry state is already represented by `sessionStatus.type === "retry"` and `applyRetryOverlay`.
++
++OpenCode fork (`/home/roomhacker/agents-projects/apps/forks/opencode`) owns the server-side configuration/runtime changes. Relevant existing surfaces are `packages/core/src/config.ts`, `packages/core/src/config/mcp.ts`, `packages/core/src/aisdk.ts`, `packages/core/src/session.ts`, `packages/core/src/session/runner`, `packages/server/src/handlers/session.ts`, and generated v2 client/schema files.
++
++The OmniRoute plugin (`/home/roomhacker/agents-projects/opencode-omniroute-models`) is not the UI owner. It may only receive a narrowly scoped hook if recovery telemetry or actual-combo metadata needs to cross the provider boundary; model catalog IDs and metadata must not be duplicated in OpenChamber.
++
++### Task 1: OpenCode resilience configuration and runtime contract (P0/P1)
++
++**Files:**
++- Create: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core/src/config/resilience.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core/src/config.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core/src/aisdk.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core/src/session.ts` and the narrow runner module that owns the model/tool loop
++- Modify: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/server/src/handlers/session.ts` only if the bridge endpoint needs server routing
++- Test: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core/test/resilience-config.test.ts`
++- Test: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core/test/session-resilience.test.ts`
++
++**Interfaces:**
++- Produce `Config.Resilience` with `responseTimeoutMs`, `toolTimeoutMs`, `retries`, `retryDelayMs`, `autoResume`, and ordered `fallbackModels: string[]`; validate non-negative retries/delays and positive enabled timeouts.
++- Produce a runtime result/error shape that preserves `attempt`, `selectedModel`, `actualModel`, and `fallbackUsed` for session events/UI metadata.
++- Preserve existing MCP startup/request timeout fields; `toolTimeoutMs` is the session tool execution ceiling, not a replacement for MCP server timeout.
++
++- [ ] **Step 1: Write failing schema and default tests.** Assert absent config decodes to safe defaults, invalid negative values fail, and fallback model IDs retain exact strings including `minimax/MiniMax-M3:512k`.
++- [ ] **Step 2: Run `bun test packages/core/test/resilience-config.test.ts` and verify failure.**
++- [ ] **Step 3: Add the schema, wire it into `Config.Info`, and apply the response timeout to the provider fetch/stream boundary and tool timeout to local tool settlement.** Retry only retryable failures, sleep exactly the configured delay between attempts, then select the next ordered fallback model; publish actual-model metadata.
++- [ ] **Step 4: Add session runtime tests for bounded retries, fallback order, timeout classification, and no retry after a committed/uncertain request.**
++- [ ] **Step 5: Run `bun test packages/core/test/resilience-config.test.ts packages/core/test/session-resilience.test.ts` and `bun run --cwd packages/core type-check`; commit as `feat: add OpenCode resilience controls`.
++
++### Task 2: Failed-message recovery actions and next-request model switching (P0/P1)
++
++**Files:**
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/sync/session-recovery-actions.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/ChatMessage.tsx`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/MessageList.tsx` and `packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/opencode/client.ts`
++- Test: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/sync/session-recovery-actions.test.ts`
++- Test: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx`
++
++**Interfaces:**
++- Produce `recoverFailedTurn(input: { sessionId: string; mode: "resume" | "restart"; providerID?: string; modelID?: string; variant?: string }): Promise<void>`.
++- `resume` uses the existing session prompt with `resume: true` after the active operation is confirmed idle; `restart` interrupts stale work, then replays the last user turn with an explicit generated message ID.
++- Produce `switchModelForNextRequest(sessionId: string, selection: ModelSelection): Promise<void>` using `session.switchModel`; active stream state is never rewritten.
++- Render raw `providerID/modelID` and optional variant in the error card, with buttons `Возобновить`, `Перезапуск`, and an opt-in model dropdown.
++
++- [ ] **Step 1: Add failing action tests for resume, restart, model selection, and duplicate-send protection.**
++- [ ] **Step 2: Run the two focused tests and verify they fail.**
++- [ ] **Step 3: Implement recovery actions against the existing session directory-aware client and store; preserve attachments/input text when a send fails.
++- [ ] **Step 4: Render actions exactly where `SessionRetry`/assistant errors are displayed and add i18n entries for English and Russian (other locales use the existing fallback mechanism).
++- [ ] **Step 5: Run focused UI tests and `bun run --cwd packages/ui type-check`; commit as `feat: add failed-turn recovery controls`.
++
++### Task 3: OpenCode reliability settings surface (P1) and automatic retry/fallback toggle (P0)
++
++**Files:**
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useResilienceSettingsStore.ts`
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/sections/openchamber/ResilienceSettings.tsx`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/sections/openchamber/OpenCodeCliSettings.tsx` or the settings section registry that owns OpenCode settings
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/persistence.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/en.settings.ts` and `packages/ui/src/lib/i18n/messages/ru.settings.ts`
++- Test: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useResilienceSettingsStore.test.ts`
++
++**Interfaces:**
++- Persist `autoResume`, `retries`, `retryDelayMs`, `responseTimeoutMs`, `toolTimeoutMs`, `fallbackEnabled`, and ordered fallback model IDs.
++- Send settings to the OpenCode runtime through the explicit config API/bridge from Task 1; changing values while busy affects the next request only.
++- Expose separate controls for “automatic resume/retry”, “fallback”, max AI response wait, max tool wait, retry count, and wait between retries.
++
++- [ ] **Step 1: Write failing persistence tests, including runtime/directory isolation and next-request semantics.**
++- [ ] **Step 2: Run `bun test packages/ui/src/stores/useResilienceSettingsStore.test.ts` and verify failure.**
++- [ ] **Step 3: Implement the store/settings section using existing settings primitives and API fetch patterns; do not add a second server or write directly to an unrelated global config file.
++- [ ] **Step 4: Run focused tests and UI type-check; commit as `feat: expose resilience settings`.
++
++### Task 4: Composer Task/MCP call menu and parent handoff (P1/P2)
++
++**Files:**
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/ComposerToolMenu.tsx`
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/opencode/tool-call-client.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/ChatInput.tsx`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/sync/session-actions.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/opencode/client.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useMcpStore.ts`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/ChatMessage.tsx`
++- Test: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/__tests__/composerToolMenu.test.tsx`
++- Test: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/opencode/tool-call-client.test.ts`
++
++**Interfaces:**
++- `listCallableActions(sessionId, directory): Promise<Array<{ kind: "task" | "mcp"; id: string; label: string; inputSchema?: unknown }>>` returns only actions proven available by the runtime.
++- `callAction(input: { sessionId: string; actionId: string; arguments: Record<string, unknown>; directory?: string }): Promise<void>` calls the explicit bridge and records the result in the current session; unsupported direct calls fail visibly.
++- `sendLastChildAnswerToParent(childSessionId, directory): Promise<void>` finds the native parent, extracts the latest completed assistant text, and sends it to the parent with raw model metadata.
++
++- [ ] **Step 1: Add failing client tests for Task discovery, MCP discovery, argument validation, unsupported action errors, and parent handoff.
++- [ ] **Step 2: Run focused tests and verify failure.
++- [ ] **Step 3: Implement the bridge only for actions actually exposed by the runtime; load MCP status and Task/subagent capability data rather than hard-coding fake entries.
++- [ ] **Step 4: Add the composer dropdown at the message input and a “Send to parent” action in a child session’s message actions; keep the menu keyboard accessible.
++- [ ] **Step 5: Run focused tests and UI type-check; commit as `feat: add composer tool actions`.
++
++### Task 5: Opt-in subagent presentation and horizontal workspace (P2)
++
++**Files:**
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useSubagentWorkspaceSettingsStore.ts`
++- Create: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/session/SubagentWorkspaceStrip.tsx`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/chat/ChatContainer.tsx`
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/layout/RightSidebar.tsx` only if the existing panel contract requires it
++- Test: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/session/__tests__/SubagentWorkspaceStrip.test.tsx`
++
++**Interfaces:**
++- Persist opt-ins `autoOpenSubagents` and `horizontalSubagentChats` with default `false`.
++- Consume the existing child-session topology and render one horizontally scrollable strip of child chats, preserving normal session navigation and read-only/parent permissions.
++
++- [ ] **Step 1: Add failing tests for defaults, auto-open on child creation, horizontal keyboard/trackpad navigation, and cleanup when a child disappears.
++- [ ] **Step 2: Run focused tests and verify failure.
++- [ ] **Step 3: Implement the strip using the existing child store/session navigation; do not create duplicate message stores.
++- [ ] **Step 4: Wire the two opt-in toggles into Settings and run focused tests/type-check; commit as `feat: add opt-in subagent workspace`.
++
++### Task 6: Integration, runtime verification, and release evidence
++
++**Files:**
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/en.ts` and Russian equivalents for chat controls
++- Modify: `/home/roomhacker/agents-projects/apps/forks/openchamber/docs/superpowers/plans/2026-07-27-resilient-chat-controls.md` to record completed checkboxes and evidence
++- Test: existing OpenChamber UI sync/session tests plus OpenCode core resilience tests
++
++- [ ] **Step 1: Run the focused suites for Tasks 1–5.
++- [ ] **Step 2: Run `bun run type-check` in both forks and `bun run build:web` in OpenChamber.
++- [ ] **Step 3: Verify the single systemd OpenCode endpoint, OpenChamber’s configured endpoint, one failed/recovered request, model switch on the next request, and raw actual-model metadata in the rendered message. Do not claim live acceptance from build output alone.
++- [ ] **Step 4: Inspect `git diff --check`, confirm no secrets or unrelated artifacts, and record exact commit IDs and runtime evidence.
++
++## Execution order
++
++After this plan is accepted, Tasks 1–5 are dispatched in parallel only after their write sets are confirmed disjoint. Task 6 runs after the workers return because it depends on all contracts. Each worker must report changed files, focused test command/output, and unresolved concerns; the lead integrates and performs final acceptance.
++
+diff --git a/packages/ui/src/components/chat/ChatMessage.tsx b/packages/ui/src/components/chat/ChatMessage.tsx
+index 3380b783..126d1259 100644
+--- a/packages/ui/src/components/chat/ChatMessage.tsx
++++ b/packages/ui/src/components/chat/ChatMessage.tsx
+@@ -37,6 +37,7 @@ import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+ import { getContextObligatoryMessages } from '@/lib/contextObligatoryMessages';
+ import { setContextObligatoryMessage } from '@/sync/session-actions';
+ import { isVSCodeRuntime } from '@/lib/desktop';
++import { FailedTurnRecoveryControls } from './FailedTurnRecoveryControls';
+ import { sendLastChildAnswerToParent } from '@/lib/opencode/tool-call-client';
+ 
+ const ToolOutputDialog = lazyWithChunkRecovery(() => import('./message/ToolOutputDialog'));
+@@ -712,7 +713,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+             return undefined;
+         }
+         const errorInfo = (message.info as { error?: unknown } | undefined)?.error as
+-            | { data?: { message?: unknown }; message?: unknown; name?: unknown }
++            | {
++                data?: {
++                    message?: unknown;
++                    providerID?: unknown;
++                    modelID?: unknown;
++                    variant?: unknown;
++                };
++                message?: unknown;
++                name?: unknown;
++              }
+             | undefined;
+         if (!errorInfo) {
+             return undefined;
+@@ -724,32 +734,61 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+         if (!detail) {
+             return undefined;
+         }
++        const recoveryProviderID = typeof errorInfo.data?.providerID === 'string' && errorInfo.data.providerID.trim().length > 0
++            ? errorInfo.data.providerID
++            : previousUserMetadata?.providerId;
++        const recoveryModelID = typeof errorInfo.data?.modelID === 'string' && errorInfo.data.modelID.trim().length > 0
++            ? errorInfo.data.modelID
++            : previousUserMetadata?.modelId;
++        const recoveryVariant = typeof errorInfo.data?.variant === 'string' && errorInfo.data.variant.trim().length > 0
++            ? errorInfo.data.variant
++            : previousUserMetadata?.variant;
++        const recovery = message.info.sessionID
++            ? {
++                sessionId: message.info.sessionID,
++                providerID: recoveryProviderID,
++                modelID: recoveryModelID,
++                variant: recoveryVariant,
++            }
++            : undefined;
+         if (errorName === 'SessionRetry') {
+             return {
+                 text: `Opencode failed to send a message. Retry attempt info: \n\`${detail}\``,
+                 variant: 'info' as const,
++                recovery,
+             };
+         }
+         if (isLikelyProviderAuthFailure(detail)) {
+             return {
+                 text: PROVIDER_AUTH_FAILURE_MESSAGE,
+                 variant: 'error' as const,
++                recovery,
+             };
+         }
+         if (detail.trim().toLowerCase() === 'aborted') {
+             return {
+                 text: 'The running turn was stopped before OpenCode could send the next message.',
+                 variant: 'info' as const,
++                recovery,
+             };
+         }
+         return {
+             text: `Opencode failed to send message with error:\n\`${detail}\``,
+             variant: 'error' as const,
++            recovery,
+         };
+-    }, [isUser, message.info]);
++    }, [isUser, message.info, previousUserMetadata]);
+ 
+     const assistantErrorText = assistantError?.text;
+     const assistantErrorVariant = assistantError?.variant;
++    const assistantErrorActions = assistantError?.recovery?.sessionId ? (
++        <FailedTurnRecoveryControls
++            sessionId={assistantError.recovery.sessionId}
++            providerID={assistantError.recovery.providerID}
++            modelID={assistantError.recovery.modelID}
++            variant={assistantError.recovery.variant}
++        />
++    ) : undefined;
+ 
+     const messageTextContent = React.useMemo(() => {
+         if (isUser) {
+@@ -1188,6 +1227,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
+                                 turnGroupingContext={turnGroupingContext}
+                                 errorMessage={assistantErrorText}
+                                 errorVariant={assistantErrorVariant}
++                                errorActions={assistantErrorActions}
+                                 reviewTransferDirection={reviewTransferDirection}
+                                 assistantTransferAction={childSessionTransferAction}
+                                 footerProviderID={headerProviderID}
+diff --git a/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx b/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx
+new file mode 100644
+index 00000000..0bad6108
+--- /dev/null
++++ b/packages/ui/src/components/chat/FailedTurnRecoveryControls.tsx
+@@ -0,0 +1,253 @@
++import React from "react";
++
++import { Button } from "@/components/ui/button";
++import { useConfigStore } from "@/stores/useConfigStore";
++import {
++  recoverFailedTurn,
++  restoreFailedTurnInput,
++  switchModelForNextRequest,
++  type ModelSelection,
++} from "@/sync/session-recovery-actions";
++
++type RecoveryProvider = {
++  id: string;
++  models?: Array<{
++    id: string;
++    variants?: Record<string, unknown>;
++  }>;
++};
++
++export type FailedTurnRecoveryControlsProps = {
++  sessionId: string;
++  providerID?: string;
++  modelID?: string;
++  variant?: string;
++  defaultModelSwitcherOpen?: boolean;
++};
++
++const normalizeValue = (value: string | undefined): string => value?.trim() ?? "";
++
++export const FailedTurnRecoveryControls: React.FC<FailedTurnRecoveryControlsProps> = ({
++  sessionId,
++  providerID,
++  modelID,
++  variant,
++  defaultModelSwitcherOpen = false,
++}) => {
++  const providers = useConfigStore((state) => state.providers as RecoveryProvider[]);
++  const [modelSwitcherOpen, setModelSwitcherOpen] = React.useState(defaultModelSwitcherOpen);
++  const [selectedProviderID, setSelectedProviderID] = React.useState(normalizeValue(providerID));
++  const [selectedModelID, setSelectedModelID] = React.useState(normalizeValue(modelID));
++  const [selectedVariant, setSelectedVariant] = React.useState(normalizeValue(variant));
++  const [pendingAction, setPendingAction] = React.useState<"resume" | "restart" | "switch" | null>(null);
++  const [actionError, setActionError] = React.useState<string | null>(null);
++
++  React.useEffect(() => {
++    restoreFailedTurnInput(sessionId);
++  }, [sessionId]);
++
++  const selectedProvider = React.useMemo(
++    () => providers.find((provider) => provider.id === selectedProviderID),
++    [providers, selectedProviderID],
++  );
++  const selectedModel = React.useMemo(
++    () => selectedProvider?.models?.find((model) => model.id === selectedModelID),
++    [selectedModelID, selectedProvider],
++  );
++  const variantOptions = React.useMemo(
++    () => (selectedModel?.variants ? Object.keys(selectedModel.variants) : []),
++    [selectedModel],
++  );
++
++  React.useEffect(() => {
++    if (selectedProviderID && !selectedProvider) {
++      setSelectedProviderID("");
++      setSelectedModelID("");
++      setSelectedVariant("");
++      return;
++    }
++    if (selectedModelID && !selectedModel) {
++      setSelectedModelID("");
++      setSelectedVariant("");
++      return;
++    }
++    if (selectedVariant && !variantOptions.includes(selectedVariant)) {
++      setSelectedVariant("");
++    }
++  }, [selectedModel, selectedModelID, selectedProvider, selectedProviderID, selectedVariant, variantOptions]);
++
++  const selection = React.useMemo<ModelSelection | undefined>(() => {
++    if (!selectedProviderID || !selectedModelID) {
++      return undefined;
++    }
++    return {
++      providerID: selectedProviderID,
++      modelID: selectedModelID,
++      variant: selectedVariant || undefined,
++    };
++  }, [selectedModelID, selectedProviderID, selectedVariant]);
++
++  const handleRecover = React.useCallback(async (mode: "resume" | "restart") => {
++    setPendingAction(mode);
++    setActionError(null);
++    try {
++      await recoverFailedTurn({
++        sessionId,
++        mode,
++        providerID: selection?.providerID,
++        modelID: selection?.modelID,
++        variant: selection?.variant,
++      });
++    } catch (error) {
++      setActionError(error instanceof Error ? error.message : String(error ?? ""));
++    } finally {
++      setPendingAction(null);
++    }
++  }, [selection, sessionId]);
++
++  const handleSwitchModel = React.useCallback(async () => {
++    if (!selection) {
++      return;
++    }
++    setPendingAction("switch");
++    setActionError(null);
++    try {
++      await switchModelForNextRequest(sessionId, selection);
++    } catch (error) {
++      setActionError(error instanceof Error ? error.message : String(error ?? ""));
++    } finally {
++      setPendingAction(null);
++    }
++  }, [selection, sessionId]);
++
++  const currentModelLabel = providerID && modelID ? `${providerID}/${modelID}` : null;
++
++  return (
++    <div className="mt-3 flex flex-col gap-3">
++      {currentModelLabel ? (
++        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
++          <span>Модель:</span>
++          <code>{currentModelLabel}</code>
++          {variant ? (
++            <>
++              <span>Вариант:</span>
++              <code>{variant}</code>
++            </>
++          ) : null}
++        </div>
++      ) : null}
++
++      <div className="flex flex-wrap gap-2">
++        <Button
++          type="button"
++          size="sm"
++          variant="secondary"
++          disabled={pendingAction !== null}
++          onClick={() => void handleRecover("resume")}
++        >
++          Возобновить
++        </Button>
++        <Button
++          type="button"
++          size="sm"
++          variant="outline"
++          disabled={pendingAction !== null}
++          onClick={() => void handleRecover("restart")}
++        >
++          Перезапуск
++        </Button>
++        <Button
++          type="button"
++          size="sm"
++          variant="ghost"
++          disabled={pendingAction !== null}
++          onClick={() => setModelSwitcherOpen((value) => !value)}
++        >
++          {modelSwitcherOpen ? "Скрыть выбор модели" : "Выбрать другую модель"}
++        </Button>
++      </div>
++
++      {modelSwitcherOpen ? (
++        <div className="grid gap-2 rounded-md border border-border/60 bg-background/60 p-3">
++          <label className="grid gap-1 text-xs text-muted-foreground">
++            <span>Провайдер</span>
++            <select
++              name="provider"
++              className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
++              value={selectedProviderID}
++              onChange={(event) => {
++                setSelectedProviderID(event.target.value);
++                setSelectedModelID("");
++                setSelectedVariant("");
++              }}
++            >
++              <option value=""></option>
++              {providers.map((provider) => (
++                <option key={provider.id} value={provider.id}>
++                  {provider.id}
++                </option>
++              ))}
++            </select>
++          </label>
++
++          <label className="grid gap-1 text-xs text-muted-foreground">
++            <span>Модель</span>
++            <select
++              name="model"
++              className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
++              value={selectedModelID}
++              onChange={(event) => {
++                setSelectedModelID(event.target.value);
++                setSelectedVariant("");
++              }}
++            >
++              <option value=""></option>
++              {(selectedProvider?.models ?? []).map((model) => (
++                <option key={model.id} value={model.id}>
++                  {model.id}
++                </option>
++              ))}
++            </select>
++          </label>
++
++          {variantOptions.length > 0 ? (
++            <label className="grid gap-1 text-xs text-muted-foreground">
++              <span>Вариант</span>
++              <select
++                name="variant"
++                className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
++                value={selectedVariant}
++                onChange={(event) => setSelectedVariant(event.target.value)}
++              >
++                <option value=""></option>
++                {variantOptions.map((variantOption) => (
++                  <option key={variantOption} value={variantOption}>
++                    {variantOption}
++                  </option>
++                ))}
++              </select>
++            </label>
++          ) : null}
++
++          <div className="flex flex-wrap gap-2">
++            <Button
++              type="button"
++              size="sm"
++              variant="secondary"
++              disabled={!selection || pendingAction !== null}
++              onClick={() => void handleSwitchModel()}
++            >
++              Использовать для следующего запроса
++            </Button>
++          </div>
++        </div>
++      ) : null}
++
++      {actionError ? (
++        <div className="text-xs text-[var(--status-error)]">
++          {actionError}
++        </div>
++      ) : null}
++    </div>
++  );
++};
+diff --git a/packages/ui/src/components/chat/MessageList.tsx b/packages/ui/src/components/chat/MessageList.tsx
+index 8a76a0e3..e3ec5d68 100644
+--- a/packages/ui/src/components/chat/MessageList.tsx
++++ b/packages/ui/src/components/chat/MessageList.tsx
+@@ -369,6 +369,18 @@ interface MessageListProps {
+     directory?: string;
+ }
+ 
++export const buildDisplayMessagesWithRetryOverlay = (
++    baseDisplayMessages: ChatMessageEntry[],
++    retryOverlay: MessageListProps['retryOverlay'],
++): ChatMessageEntry[] => {
++    return applyRetryOverlay(baseDisplayMessages, {
++        sessionId: retryOverlay?.sessionId ?? null,
++        message: retryOverlay?.message ?? 'Quota limit reached. Retrying automatically.',
++        confirmedAt: retryOverlay?.confirmedAt,
++        fallbackTimestamp: retryOverlay?.fallbackTimestamp ?? 0,
++    });
++};
++
+ export interface MessageListHandle {
+     scrollToTurnId: (turnId: string, options?: { behavior?: ScrollBehavior }) => boolean;
+     scrollToMessageId: (messageId: string, options?: { behavior?: ScrollBehavior }) => boolean;
+@@ -1369,12 +1381,7 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
+     }, [scrollRef]);
+ 
+     const displayMessages = React.useMemo(() => streamPerfMeasure('ui.message_list.retry_overlay_ms', () => {
+-        return applyRetryOverlay(baseDisplayMessages, {
+-            sessionId: retryOverlay?.sessionId ?? null,
+-            message: retryOverlay?.message ?? 'Quota limit reached. Retrying automatically.',
+-            confirmedAt: retryOverlay?.confirmedAt,
+-            fallbackTimestamp: retryOverlay?.fallbackTimestamp ?? 0,
+-        });
++        return buildDisplayMessagesWithRetryOverlay(baseDisplayMessages, retryOverlay);
+     }), [baseDisplayMessages, retryOverlay]);
+ 
+     const planModeEnabled = useFeatureFlagsStore((state) => state.planModeEnabled);
+diff --git a/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx b/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx
+new file mode 100644
+index 00000000..299121b2
+--- /dev/null
++++ b/packages/ui/src/components/chat/__tests__/failedMessageRecovery.test.tsx
+@@ -0,0 +1,92 @@
++import { describe, expect, mock, test } from "bun:test";
++import React from "react";
++import { renderToStaticMarkup } from "react-dom/server";
++
++import { applyRetryOverlay } from "../lib/turns/applyRetryOverlay";
++
++mock.module("@/stores/useConfigStore", () => ({
++  useConfigStore: (selector: (state: { providers: unknown[] }) => unknown) => selector({
++    providers: [
++      {
++        id: "anthropic",
++        models: [
++          { id: "claude-sonnet-4", name: "Claude Sonnet 4", variants: { deep: {}, balanced: {} } },
++        ],
++      },
++      {
++        id: "openai",
++        models: [
++          { id: "gpt-5", name: "GPT-5", variants: { high: {}, low: {} } },
++        ],
++      },
++    ],
++  }),
++}));
++
++import { FailedTurnRecoveryControls } from "../FailedTurnRecoveryControls";
++
++describe("failed message recovery ui", () => {
++  test("retry overlay preserves raw provider/model/variant metadata from the failed user turn", () => {
++    const messages = applyRetryOverlay([
++      {
++        info: {
++          id: "user-1",
++          role: "user",
++          sessionID: "session-1",
++          providerID: "anthropic",
++          modelID: "claude-sonnet-4",
++          model: {
++            providerID: "anthropic",
++            modelID: "claude-sonnet-4",
++            variant: "deep",
++          },
++          time: { created: 1 },
++        } as never,
++        parts: [],
++      },
++    ], {
++      sessionId: "session-1",
++      message: "waiting for provider",
++      fallbackTimestamp: 10,
++    });
++
++    const synthetic = messages[1];
++    const error = (synthetic?.info as { error?: { data?: Record<string, unknown> } } | undefined)?.error;
++
++    expect(error?.data?.providerID).toBe("anthropic");
++    expect(error?.data?.modelID).toBe("claude-sonnet-4");
++    expect(error?.data?.variant).toBe("deep");
++  });
++
++  test("renders raw failure metadata, recovery buttons, and the opt-in model picker", () => {
++    const collapsed = renderToStaticMarkup(
++      <FailedTurnRecoveryControls
++        sessionId="session-1"
++        providerID="anthropic"
++        modelID="claude-sonnet-4"
++        variant="deep"
++      />,
++    );
++
++    expect(collapsed).toContain("anthropic/claude-sonnet-4");
++    expect(collapsed).toContain("deep");
++    expect(collapsed).toContain("Возобновить");
++    expect(collapsed).toContain("Перезапуск");
++    expect(collapsed).toContain("Выбрать другую модель");
++
++    const expanded = renderToStaticMarkup(
++      <FailedTurnRecoveryControls
++        sessionId="session-1"
++        providerID="anthropic"
++        modelID="claude-sonnet-4"
++        variant="deep"
++        defaultModelSwitcherOpen
++      />,
++    );
++
++    expect(expanded).toContain("Использовать для следующего запроса");
++    expect(expanded).toContain("name=\"provider\"");
++    expect(expanded).toContain("name=\"model\"");
++    expect(expanded).toContain("name=\"variant\"");
++  });
++});
+diff --git a/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts b/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts
+index ffd56cb6..b620c735 100644
+--- a/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts
++++ b/packages/ui/src/components/chat/lib/turns/applyRetryOverlay.ts
+@@ -16,6 +16,31 @@ interface RetryOverlayInput {
+     fallbackTimestamp: number;
+ }
+ 
++const readUserSelection = (message: ChatMessageEntry): { providerID?: string; modelID?: string; variant?: string } => {
++    const info = message.info as {
++        providerID?: unknown;
++        modelID?: unknown;
++        variant?: unknown;
++        model?: {
++            providerID?: unknown;
++            modelID?: unknown;
++            variant?: unknown;
++        };
++    };
++
++    const providerID = typeof info.model?.providerID === 'string' && info.model.providerID.trim().length > 0
++        ? info.model.providerID
++        : (typeof info.providerID === 'string' && info.providerID.trim().length > 0 ? info.providerID : undefined);
++    const modelID = typeof info.model?.modelID === 'string' && info.model.modelID.trim().length > 0
++        ? info.model.modelID
++        : (typeof info.modelID === 'string' && info.modelID.trim().length > 0 ? info.modelID : undefined);
++    const variant = typeof info.model?.variant === 'string' && info.model.variant.trim().length > 0
++        ? info.model.variant
++        : (typeof info.variant === 'string' && info.variant.trim().length > 0 ? info.variant : undefined);
++
++    return { providerID, modelID, variant };
++};
++
+ export const applyRetryOverlay = (
+     messages: ChatMessageEntry[],
+     input: RetryOverlayInput,
+@@ -24,12 +49,6 @@ export const applyRetryOverlay = (
+         return messages;
+     }
+ 
+-    const retryError = {
+-        name: 'SessionRetry',
+-        message: input.message,
+-        data: { message: input.message },
+-    };
+-
+     let lastUserIndex = -1;
+     for (let index = messages.length - 1; index >= 0; index -= 1) {
+         if (resolveMessageRole(messages[index]) === 'user') {
+@@ -42,6 +61,18 @@ export const applyRetryOverlay = (
+         return messages;
+     }
+ 
++    const lastUserSelection = readUserSelection(messages[lastUserIndex]);
++    const retryError = {
++        name: 'SessionRetry',
++        message: input.message,
++        data: {
++            message: input.message,
++            ...(lastUserSelection.providerID ? { providerID: lastUserSelection.providerID } : {}),
++            ...(lastUserSelection.modelID ? { modelID: lastUserSelection.modelID } : {}),
++            ...(lastUserSelection.variant ? { variant: lastUserSelection.variant } : {}),
++        },
++    };
++
+     let targetAssistantIndex = -1;
+     for (let index = messages.length - 1; index > lastUserIndex; index -= 1) {
+         if (resolveMessageRole(messages[index]) === 'assistant') {
+diff --git a/packages/ui/src/components/chat/message/MessageBody.tsx b/packages/ui/src/components/chat/message/MessageBody.tsx
+index 492dbb0e..bc8252ba 100644
+--- a/packages/ui/src/components/chat/message/MessageBody.tsx
++++ b/packages/ui/src/components/chat/message/MessageBody.tsx
+@@ -433,6 +433,7 @@ interface MessageBodyProps {
+     onFork?: () => void;
+     errorMessage?: string;
+     errorVariant?: 'error' | 'info';
++    errorActions?: React.ReactNode;
+     userActionsMode?: 'inline' | 'external-content' | 'external-actions';
+     stickyUserHeaderEnabled?: boolean;
+     reviewTransferDirection?: ReviewTransferDirection | null;
+@@ -1097,6 +1098,7 @@ const AssistantMessageBody = React.memo(({
+     turnGroupingContext,
+     errorMessage,
+     errorVariant = 'error',
++    errorActions,
+     reviewTransferDirection = null,
+     assistantTransferAction,
+     contextPinned,
+@@ -2228,6 +2230,11 @@ const AssistantMessageBody = React.memo(({
+                                         />
+                                     </div>
+                                 </div>
++                                {errorActions ? (
++                                    <div className="mt-3">
++                                        {errorActions}
++                                    </div>
++                                ) : null}
+                             </div>
+                         </FadeInOnReveal>
+                     )}
+diff --git a/packages/ui/src/lib/opencode/client.ts b/packages/ui/src/lib/opencode/client.ts
+index 9845a6d1..8e35b631 100644
+--- a/packages/ui/src/lib/opencode/client.ts
++++ b/packages/ui/src/lib/opencode/client.ts
+@@ -272,6 +272,10 @@ class OpencodeService {
+     return this.baseUrl;
+   }
+ 
++  createMessageId(): string {
++    return ascendingId("msg");
++  }
++
+   reconnectToRuntimeBaseUrl(): void {
+     const runtimeBase = resolveRuntimeBaseUrl();
+     const nextBaseUrl = ensureAbsoluteBaseUrl(runtimeBase || DEFAULT_BASE_URL);
+@@ -950,17 +954,65 @@ class OpencodeService {
+     return tempMessageId;
+   }
+ 
+-  async abortSession(id: string): Promise<boolean> {
++  async abortSession(id: string, directory?: string | null): Promise<boolean> {
++    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
+     const response = await this.client.session.abort(
+       {
+         sessionID: id,
+-        ...(this.currentDirectory ? { directory: this.currentDirectory } : {})
++        ...(requestDirectory ? { directory: requestDirectory } : {})
+       },
+       { throwOnError: true }
+     );
+     return Boolean(response.data);
+   }
+ 
++  async waitForSessionIdle(sessionId: string, directory?: string | null): Promise<void> {
++    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
++    const client = requestDirectory ? this.getScopedApiClient(requestDirectory) : this.client;
++    const response = await client.v2.session.wait({ sessionID: sessionId });
++    unwrapSdkOptional(response, 'v2.session.wait');
++  }
++
++  async switchSessionModel(
++    sessionId: string,
++    selection: { providerID: string; modelID: string; variant?: string },
++    directory?: string | null,
++  ): Promise<void> {
++    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
++    const client = requestDirectory ? this.getScopedApiClient(requestDirectory) : this.client;
++    const response = await client.v2.session.switchModel({
++      sessionID: sessionId,
++      model: {
++        providerID: selection.providerID,
++        id: selection.modelID,
++        ...(selection.variant ? { variant: selection.variant } : {}),
++      },
++    });
++    unwrapSdkOptional(response, 'v2.session.switchModel');
++  }
++
++  async promptSession(params: {
++    sessionId: string;
++    prompt: {
++      text: string;
++      files?: Array<{ uri: string; name?: string }>;
++      agents?: Array<{ name: string }>;
++    };
++    id?: string;
++    resume?: boolean;
++    directory?: string | null;
++  }): Promise<void> {
++    const requestDirectory = this.normalizeCandidatePath(params.directory) ?? this.currentDirectory;
++    const client = requestDirectory ? this.getScopedApiClient(requestDirectory) : this.client;
++    const response = await client.v2.session.prompt({
++      sessionID: params.sessionId,
++      ...(params.id ? { id: params.id } : {}),
++      ...(params.resume !== undefined ? { resume: params.resume } : {}),
++      prompt: params.prompt,
++    });
++    unwrapSdkOptional(response, 'v2.session.prompt');
++  }
++
+   async shellSession(params: {
+     sessionId: string;
+     command: string;
+diff --git a/packages/ui/src/sync/session-recovery-actions.test.ts b/packages/ui/src/sync/session-recovery-actions.test.ts
+new file mode 100644
+index 00000000..74f9150b
+--- /dev/null
++++ b/packages/ui/src/sync/session-recovery-actions.test.ts
+@@ -0,0 +1,254 @@
++import { beforeEach, describe, expect, mock, test } from "bun:test";
++
++type PromptCall = {
++  sessionId: string;
++  directory?: string | null;
++  id?: string;
++  resume?: boolean;
++  prompt: {
++    text: string;
++    files?: Array<{ uri: string; name?: string }>;
++    agents?: Array<{ name: string }>;
++  };
++};
++
++const operationLog: Array<Record<string, unknown>> = [];
++const sessionMessages: Array<Record<string, unknown>> = [];
++const sessionParts = new Map<string, Array<Record<string, unknown>>>();
++const savedSelections: Array<Record<string, unknown>> = [];
++let promptImpl: (params: PromptCall) => Promise<void> = async () => undefined;
++
++const selectionState = {
++  saveSessionModelSelection: (sessionId: string, providerId: string, modelId: string) => {
++    savedSelections.push({ kind: "session", sessionId, providerId, modelId });
++  },
++  saveAgentModelForSession: (sessionId: string, agentName: string, providerId: string, modelId: string) => {
++    savedSelections.push({ kind: "agent-model", sessionId, agentName, providerId, modelId });
++  },
++  saveAgentModelVariantForSession: (
++    sessionId: string,
++    agentName: string,
++    providerId: string,
++    modelId: string,
++    variant: string | undefined,
++  ) => {
++    savedSelections.push({ kind: "agent-variant", sessionId, agentName, providerId, modelId, variant });
++  },
++  getSessionAgentSelection: () => "planner",
++};
++
++mock.module("@/lib/opencode/client", () => ({
++  opencodeClient: {
++    waitForSessionIdle: async (sessionId: string, directory?: string | null) => {
++      operationLog.push({ kind: "wait", sessionId, directory });
++    },
++    abortSession: async (sessionId: string, directory?: string | null) => {
++      operationLog.push({ kind: "abort", sessionId, directory });
++      return true;
++    },
++    promptSession: async (params: PromptCall) => {
++      operationLog.push({ kind: "prompt", ...params });
++      await promptImpl(params);
++    },
++    switchSessionModel: async (
++      sessionId: string,
++      selection: { providerID: string; modelID: string; variant?: string },
++      directory?: string | null,
++    ) => {
++      operationLog.push({ kind: "switch-model", sessionId, selection, directory });
++    },
++    createMessageId: () => "msg_recovery_001",
++  },
++}));
++
++mock.module("./sync-refs", () => ({
++  getSyncMessages: () => sessionMessages,
++  getSyncParts: (messageId: string) => sessionParts.get(messageId) ?? [],
++}));
++
++mock.module("./session-ui-store", () => ({
++  useSessionUIStore: {
++    getState: () => ({
++      getDirectoryForSession: () => "/repo/openchamber",
++    }),
++  },
++}));
++
++mock.module("./selection-store", () => ({
++  useSelectionStore: {
++    getState: () => selectionState,
++  },
++}));
++
++mock.module("./input-store", () => ({
++  useInputStore: {
++    getState: () => ({
++      pendingInputText: null,
++      attachedFiles: [],
++      setPendingInputText: () => undefined,
++      setAttachedFiles: () => undefined,
++    }),
++  },
++}));
++
++import { recoverFailedTurn, switchModelForNextRequest } from "./session-recovery-actions";
++
++const seedFailedTurn = (): void => {
++  sessionMessages.length = 0;
++  sessionParts.clear();
++
++  sessionMessages.push(
++    {
++      id: "assistant-0",
++      role: "assistant",
++      sessionID: "session-1",
++      time: { created: 1, completed: 2 },
++    },
++    {
++      id: "user-1",
++      role: "user",
++      sessionID: "session-1",
++      agent: "planner",
++      providerID: "anthropic",
++      modelID: "claude-sonnet-4",
++      model: {
++        providerID: "anthropic",
++        modelID: "claude-sonnet-4",
++        variant: "deep",
++      },
++      time: { created: 3 },
++    },
++  );
++
++  sessionParts.set("user-1", [
++    { id: "part-text", type: "text", text: "Retry this exact request", synthetic: false },
++    { id: "part-file", type: "file", url: "file:///repo/openchamber/notes.md", filename: "notes.md", synthetic: false },
++    { id: "part-agent", type: "agent", name: "reviewer" },
++  ]);
++};
++
++describe("session-recovery-actions", () => {
++  beforeEach(() => {
++    operationLog.length = 0;
++    savedSelections.length = 0;
++    promptImpl = async () => undefined;
++    seedFailedTurn();
++  });
++
++  test("resume waits for idle and replays the last user prompt through durable session.prompt", async () => {
++    await recoverFailedTurn({ sessionId: "session-1", mode: "resume" });
++
++    expect(operationLog).toEqual([
++      {
++        kind: "wait",
++        sessionId: "session-1",
++        directory: "/repo/openchamber",
++      },
++      {
++        kind: "switch-model",
++        sessionId: "session-1",
++        selection: { providerID: "anthropic", modelID: "claude-sonnet-4", variant: "deep" },
++        directory: "/repo/openchamber",
++      },
++      {
++        kind: "prompt",
++        sessionId: "session-1",
++        directory: "/repo/openchamber",
++        resume: true,
++        prompt: {
++          text: "Retry this exact request",
++          files: [{ uri: "file:///repo/openchamber/notes.md", name: "notes.md" }],
++          agents: [{ name: "reviewer" }],
++        },
++      },
++    ]);
++  });
++
++  test("restart aborts stale work, waits for idle, and uses an explicit generated message id", async () => {
++    await recoverFailedTurn({
++      sessionId: "session-1",
++      mode: "restart",
++      providerID: "openai",
++      modelID: "gpt-5",
++      variant: "high",
++    });
++
++    expect(operationLog).toEqual([
++      {
++        kind: "abort",
++        sessionId: "session-1",
++        directory: "/repo/openchamber",
++      },
++      {
++        kind: "wait",
++        sessionId: "session-1",
++        directory: "/repo/openchamber",
++      },
++      {
++        kind: "switch-model",
++        sessionId: "session-1",
++        selection: { providerID: "openai", modelID: "gpt-5", variant: "high" },
++        directory: "/repo/openchamber",
++      },
++      {
++        kind: "prompt",
++        sessionId: "session-1",
++        directory: "/repo/openchamber",
++        id: "msg_recovery_001",
++        resume: true,
++        prompt: {
++          text: "Retry this exact request",
++          files: [{ uri: "file:///repo/openchamber/notes.md", name: "notes.md" }],
++          agents: [{ name: "reviewer" }],
++        },
++      },
++    ]);
++  });
++
++  test("switchModelForNextRequest uses session.switchModel and updates persisted selections", async () => {
++    await switchModelForNextRequest("session-1", {
++      providerID: "openai",
++      modelID: "gpt-5",
++      variant: "high",
++    });
++
++    expect(operationLog).toEqual([
++      {
++        kind: "switch-model",
++        sessionId: "session-1",
++        selection: { providerID: "openai", modelID: "gpt-5", variant: "high" },
++        directory: "/repo/openchamber",
++      },
++    ]);
++    expect(savedSelections).toEqual([
++      { kind: "session", sessionId: "session-1", providerId: "openai", modelId: "gpt-5" },
++      { kind: "agent-model", sessionId: "session-1", agentName: "planner", providerId: "openai", modelId: "gpt-5" },
++      {
++        kind: "agent-variant",
++        sessionId: "session-1",
++        agentName: "planner",
++        providerId: "openai",
++        modelId: "gpt-5",
++        variant: "high",
++      },
++    ]);
++  });
++
++  test("deduplicates concurrent recovery requests for the same session", async () => {
++    const promptGate: { release?: () => void } = {};
++    promptImpl = () => new Promise<void>((resolve) => {
++      promptGate.release = resolve;
++    });
++
++    const first = recoverFailedTurn({ sessionId: "session-1", mode: "resume" });
++    const second = recoverFailedTurn({ sessionId: "session-1", mode: "resume" });
++
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    expect(operationLog.filter((entry) => entry.kind === "prompt")).toHaveLength(1);
++
++    if (promptGate.release) {
++      promptGate.release();
++    }
++    await Promise.all([first, second]);
++  });
++});
+diff --git a/packages/ui/src/sync/session-recovery-actions.ts b/packages/ui/src/sync/session-recovery-actions.ts
+new file mode 100644
+index 00000000..3dbf2508
+--- /dev/null
++++ b/packages/ui/src/sync/session-recovery-actions.ts
+@@ -0,0 +1,219 @@
++import { isSyntheticPart } from "@/lib/messages/synthetic";
++import { opencodeClient } from "@/lib/opencode/client";
++
++import { useInputStore } from "./input-store";
++import { useSelectionStore } from "./selection-store";
++import { getSyncMessages, getSyncParts } from "./sync-refs";
++import { useSessionUIStore } from "./session-ui-store";
++
++export type ModelSelection = {
++  providerID: string;
++  modelID: string;
++  variant?: string;
++};
++
++type RecoverFailedTurnInput = {
++  sessionId: string;
++  mode: "resume" | "restart";
++  providerID?: string;
++  modelID?: string;
++  variant?: string;
++};
++
++type RecoveryFileAttachment = {
++  uri: string;
++  name?: string;
++  mimeType?: string;
++};
++
++type RecoverableTurn = {
++  prompt: {
++    text: string;
++    files?: RecoveryFileAttachment[];
++    agents?: Array<{ name: string }>;
++  };
++  selection?: ModelSelection;
++};
++
++const recoveryInFlight = new Map<string, Promise<void>>();
++
++const normalizeString = (value: unknown): string | undefined => {
++  if (typeof value !== "string") {
++    return undefined;
++  }
++  const trimmed = value.trim();
++  return trimmed.length > 0 ? trimmed : undefined;
++};
++
++const getRecoveryDirectory = (sessionId: string): string | undefined => {
++  return useSessionUIStore.getState().getDirectoryForSession(sessionId) ?? undefined;
++};
++
++const readLastUserMessage = (sessionId: string, directory?: string): Record<string, unknown> => {
++  const messages = getSyncMessages(sessionId, directory) as Array<Record<string, unknown>>;
++  for (let index = messages.length - 1; index >= 0; index -= 1) {
++    if (messages[index]?.role === "user") {
++      return messages[index];
++    }
++  }
++  throw new Error(`No user turn available to recover for ${sessionId}`);
++};
++
++const readRecoverableTurn = (sessionId: string, directory?: string): RecoverableTurn => {
++  const message = readLastUserMessage(sessionId, directory);
++  const messageId = normalizeString(message.id);
++  const parts = messageId ? getSyncParts(messageId, directory) as Array<Record<string, unknown>> : [];
++
++  const textParts = parts
++    .filter((part) => part.type === "text" && !isSyntheticPart(part as never))
++    .map((part) => normalizeString(part.text) ?? normalizeString(part.content) ?? "")
++    .filter((part) => part.length > 0);
++  const promptText = textParts.join("\n").trim() || normalizeString(message.text) || "";
++
++  const files = parts
++    .filter((part) => part.type === "file" && !isSyntheticPart(part as never))
++    .map((part) => ({
++      uri: normalizeString(part.url) ?? "",
++      name: normalizeString(part.filename),
++      mimeType: normalizeString(part.mime),
++    }))
++    .filter((file) => file.uri.length > 0);
++
++  const agents = parts
++    .filter((part) => part.type === "agent")
++    .map((part) => normalizeString(part.name))
++    .filter((name): name is string => Boolean(name))
++    .map((name) => ({ name }));
++
++  if (!promptText && files.length === 0 && agents.length === 0) {
++    throw new Error(`The last user turn in ${sessionId} has no recoverable prompt content`);
++  }
++
++  const providerID = normalizeString((message.model as { providerID?: unknown } | undefined)?.providerID)
++    ?? normalizeString(message.providerID);
++  const modelID = normalizeString((message.model as { modelID?: unknown } | undefined)?.modelID)
++    ?? normalizeString(message.modelID);
++  const messageVariant = normalizeString((message.model as { variant?: unknown } | undefined)?.variant)
++    ?? normalizeString(message.variant);
++
++  return {
++    prompt: {
++      text: promptText,
++      ...(files.length > 0 ? { files } : {}),
++      ...(agents.length > 0 ? { agents } : {}),
++    },
++    selection: providerID && modelID ? { providerID, modelID, ...(messageVariant ? { variant: messageVariant } : {}) } : undefined,
++  };
++};
++
++const resolveRecoverySelection = (
++  input: RecoverFailedTurnInput,
++  fallback: ModelSelection | undefined,
++): ModelSelection | undefined => {
++  const providerID = normalizeString(input.providerID) ?? fallback?.providerID;
++  const modelID = normalizeString(input.modelID) ?? fallback?.modelID;
++  if (!providerID || !modelID) {
++    return undefined;
++  }
++  const variant = normalizeString(input.variant) ?? fallback?.variant;
++  return { providerID, modelID, ...(variant ? { variant } : {}) };
++};
++
++const readAgentName = (sessionId: string): string | undefined => {
++  const selection = useSelectionStore.getState().getSessionAgentSelection(sessionId);
++  if (selection) {
++    return selection;
++  }
++  const lastChoice = useSessionUIStore.getState().getLastUserChoice(sessionId);
++  return normalizeString(lastChoice?.agent);
++};
++
++export const restoreFailedTurnInput = (sessionId: string): void => {
++  const directory = getRecoveryDirectory(sessionId);
++  const recoverableTurn = readRecoverableTurn(sessionId, directory);
++  const inputStore = useInputStore.getState();
++
++  if ((!inputStore.pendingInputText || inputStore.pendingInputText.trim().length === 0) && recoverableTurn.prompt.text) {
++    inputStore.setPendingInputText(recoverableTurn.prompt.text, "replace");
++  }
++
++  if ((inputStore.attachedFiles?.length ?? 0) > 0) {
++    return;
++  }
++
++  const recoverableFiles = recoverableTurn.prompt.files ?? [];
++  if (recoverableFiles.length === 0) {
++    return;
++  }
++
++  inputStore.clearAttachedFiles?.();
++  for (const file of recoverableFiles) {
++    inputStore.addRestoredAttachment?.({
++      url: file.uri,
++      mimeType: file.mimeType ?? "application/octet-stream",
++      filename: file.name ?? "attachment",
++    });
++  }
++};
++
++export const switchModelForNextRequest = async (sessionId: string, selection: ModelSelection): Promise<void> => {
++  if (!normalizeString(selection.providerID) || !normalizeString(selection.modelID)) {
++    throw new Error("A providerID/modelID pair is required to switch the next request model");
++  }
++
++  const directory = getRecoveryDirectory(sessionId);
++  await opencodeClient.switchSessionModel(sessionId, selection, directory);
++
++  const selectionStore = useSelectionStore.getState();
++  selectionStore.saveSessionModelSelection(sessionId, selection.providerID, selection.modelID);
++
++  const agentName = readAgentName(sessionId);
++  if (agentName) {
++    selectionStore.saveAgentModelForSession(sessionId, agentName, selection.providerID, selection.modelID);
++    selectionStore.saveAgentModelVariantForSession(
++      sessionId,
++      agentName,
++      selection.providerID,
++      selection.modelID,
++      selection.variant,
++    );
++  }
++};
++
++export const recoverFailedTurn = async (input: RecoverFailedTurnInput): Promise<void> => {
++  const existing = recoveryInFlight.get(input.sessionId);
++  if (existing) {
++    return existing;
++  }
++
++  const execution = (async () => {
++    const directory = getRecoveryDirectory(input.sessionId);
++    const recoverableTurn = readRecoverableTurn(input.sessionId, directory);
++    const selection = resolveRecoverySelection(input, recoverableTurn.selection);
++
++    restoreFailedTurnInput(input.sessionId);
++
++    if (input.mode === "restart") {
++      await opencodeClient.abortSession(input.sessionId, directory);
++    }
++
++    await opencodeClient.waitForSessionIdle(input.sessionId, directory);
++
++    if (selection) {
++      await switchModelForNextRequest(input.sessionId, selection);
++    }
++
++    await opencodeClient.promptSession({
++      sessionId: input.sessionId,
++      directory,
++      ...(input.mode === "restart" ? { id: opencodeClient.createMessageId() } : {}),
++      resume: true,
++      prompt: recoverableTurn.prompt,
++    });
++  })().finally(() => {
++    recoveryInFlight.delete(input.sessionId);
++  });
++
++  recoveryInFlight.set(input.sessionId, execution);
++  return execution;
++};
+-- 
+2.34.1

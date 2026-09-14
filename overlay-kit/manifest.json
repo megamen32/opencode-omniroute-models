@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "kit": "roomhacker-opencode-openchamber-overlay",
+  "deploymentRule": "build-and-deploy managed artifacts; never patch an upstream checkout in place",
+  "components": [
+    {
+      "id": "opencode-resilience-core",
+      "product": "opencode",
+      "kind": "git-am-series",
+      "base": "62e4641235d7847dadc60da37cca8a023dd54fc1",
+      "patches": [
+        "patches/opencode/0001-feat-add-OpenCode-resilience-controls.patch",
+        "patches/opencode/0001-feat-add-runtime-resilience-and-direct-tool-calls.patch"
+      ],
+      "patchHashes": {
+        "patches/opencode/0001-feat-add-OpenCode-resilience-controls.patch": "0cfeacb780eb2995ba752c6b3c90dd80529142e461e406422ae6a289ee0ca669",
+        "patches/opencode/0001-feat-add-runtime-resilience-and-direct-tool-calls.patch": "5cb48588a8adbb7f2f2731fc3f8de24e5171b03326c22f42d4f754b37a603e1c"
+      },
+      "verify": ["patches-apply", "core-tests", "config-roundtrip", "resume-and-tool-api"]
+    },
+    {
+      "id": "openchamber-roomhacker-ui",
+      "product": "openchamber",
+      "kind": "git-am-series",
+      "base": "09f81106c558eeec4afbafe113d8e3dd5e5cb711",
+      "patches": [
+        "patches/openchamber-v117/0001-feat-add-opt-in-subagent-workspace.patch",
+        "patches/openchamber-v117/0002-feat-expose-resilience-settings.patch",
+        "patches/openchamber-v117/0003-feat-add-discovery-only-composer-tool-menu.patch",
+        "patches/openchamber-v117/0004-feat-add-failed-turn-recovery-controls.patch",
+        "patches/openchamber-v117/0005-test-isolate-resilient-chat-integration-tests.patch",
+        "patches/openchamber-v117/0006-feat-finish-resilient-chat-controls.patch"
+      ],
+      "patchHashes": {
+      "patches/openchamber-v117/0001-feat-add-opt-in-subagent-workspace.patch": "062c3910c8d4311bd150f24a969efbddf9ba0f8b473c50b4170d3ed1cb3e92c3",
+      "patches/openchamber-v117/0002-feat-expose-resilience-settings.patch": "bae12a7207f71be2ec5a692493a709cc5229de30ca972beebc515ad3b605a553",
+      "patches/openchamber-v117/0003-feat-add-discovery-only-composer-tool-menu.patch": "13431e60786eb97d9f81c39f9a0bc7a3ca5c93061d7530eb21c38c142fa1e1a9",
+      "patches/openchamber-v117/0004-feat-add-failed-turn-recovery-controls.patch": "eccecad89df6f365a331f61badd0ce1ba3579e3cebcebb91ba68caf026e1620a",
+      "patches/openchamber-v117/0005-test-isolate-resilient-chat-integration-tests.patch": "d78159bdbc9294319b3a148cb5764b8d22c81fc495270fb335ed66d66544bb51",
+      "patches/openchamber-v117/0006-feat-finish-resilient-chat-controls.patch": "e2ec261f1f143ab3879972d8a687d1435c17a58756472469f147574cef1d9e99"
+      },
+      "verify": ["patches-apply", "ui-tests", "config-roundtrip", "failed-turn-controls"]
+    },
+    {
+      "id": "omniroute-provider",
+      "product": "opencode-plugin",
+      "kind": "plugin",
+      "entry": "../index.js",
+      "verify": ["catalog-tests", "provider-visible", "exact-model-id", "telemetry-contract"]
+    },
+    {
+      "id": "openchamber-exact-model-display",
+      "product": "openchamber",
+      "kind": "runtime-patch",
+      "entry": "../scripts/patch-openchamber-runtime.mjs",
+      "target": "deployed-dist-only",
+      "anchor": "exactly one humanized model display helper",
+      "verify": ["single-anchor", "idempotent-patch", "exact-id-render"]
+    }
+  ]
+}

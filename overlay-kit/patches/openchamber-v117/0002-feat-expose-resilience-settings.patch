@@ -1,0 +1,1622 @@
+From 14a4a544d4ff109cf4b56cf552c76a9a23a54597 Mon Sep 17 00:00:00 2001
+From: roomhacker <roomhacker@bezrabotnyi.com>
+Date: Mon, 27 Jul 2026 18:48:26 +0300
+Subject: [PATCH 2/6] feat: expose resilience settings
+
+---
+ .superpowers/sdd/task-3-report.md             | 118 ++++++
+ .../sections/openchamber/OpenChamberPage.tsx  |   3 +
+ .../openchamber/ResilienceSettings.tsx        | 194 ++++++++++
+ packages/ui/src/lib/api/types.ts              |   7 +
+ packages/ui/src/lib/desktop.ts                |   7 +
+ .../ui/src/lib/i18n/messages/en.settings.ts   |  21 ++
+ .../ui/src/lib/i18n/messages/es.settings.ts   |  21 ++
+ .../ui/src/lib/i18n/messages/ja.settings.ts   |  21 ++
+ .../ui/src/lib/i18n/messages/ko.settings.ts   |  21 ++
+ .../ui/src/lib/i18n/messages/pl.settings.ts   |  21 ++
+ .../src/lib/i18n/messages/pt-BR.settings.ts   |  21 ++
+ .../ui/src/lib/i18n/messages/uk.settings.ts   |  21 ++
+ .../src/lib/i18n/messages/zh-CN.settings.ts   |  21 ++
+ .../src/lib/i18n/messages/zh-TW.settings.ts   |  21 ++
+ packages/ui/src/lib/persistence.ts            |  48 +++
+ packages/ui/src/lib/settings/search.ts        |  56 +++
+ .../stores/useResilienceSettingsStore.test.ts | 345 +++++++++++++++++
+ .../src/stores/useResilienceSettingsStore.ts  | 354 ++++++++++++++++++
+ .../server/lib/opencode/settings-helpers.js   |  26 ++
+ .../lib/opencode/settings-helpers.test.js     |  22 ++
+ 20 files changed, 1369 insertions(+)
+ create mode 100644 .superpowers/sdd/task-3-report.md
+ create mode 100644 packages/ui/src/components/sections/openchamber/ResilienceSettings.tsx
+ create mode 100644 packages/ui/src/stores/useResilienceSettingsStore.test.ts
+ create mode 100644 packages/ui/src/stores/useResilienceSettingsStore.ts
+
+diff --git a/.superpowers/sdd/task-3-report.md b/.superpowers/sdd/task-3-report.md
+new file mode 100644
+index 00000000..0cb75520
+--- /dev/null
++++ b/.superpowers/sdd/task-3-report.md
+@@ -0,0 +1,118 @@
++# Task 3 report — OpenCode reliability settings surface
++
++Date: 2026-07-27
++Repository: `/home/roomhacker/agents-projects/apps/forks/openchamber`
++Brief: `/home/roomhacker/agents-projects/apps/forks/openchamber/.superpowers/sdd/task-3-brief.md`
++Base commit: `b2a4415531760261159f2c7e9035e49ee5123858`
++
++## Outcome
++
++Implemented a persisted OpenChamber resilience settings surface for:
++
++- `autoResume`
++- `retries`
++- `retryDelayMs`
++- `responseTimeoutMs`
++- `toolTimeoutMs`
++- `fallbackEnabled`
++- ordered `fallbackModelIds`
++
++The implementation uses the existing runtime/directory-scoped settings bridge only:
++
++- load via the registered runtime settings API when present, else `/api/config/settings`
++- save via existing desktop settings persistence
++- directory-scoped fallback model discovery via existing provider/config lookup
++
++No second server was added. No unrelated global config file was introduced.
++
++## TDD evidence
++
++### 1. Failing tests added first
++
++Added:
++
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useResilienceSettingsStore.test.ts`
++- regression case in `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/web/server/lib/opencode/settings-helpers.test.js`
++
++Initial red evidence:
++
++- `bun test packages/ui/src/stores/useResilienceSettingsStore.test.ts`
++  - failed because `./useResilienceSettingsStore` did not exist yet
++- bridge sanitizer regression test initially failed because resilience fields were dropped from `sanitizeSettingsUpdate`
++
++### 2. Implemented slice
++
++Created:
++
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/stores/useResilienceSettingsStore.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/sections/openchamber/ResilienceSettings.tsx`
++
++Modified:
++
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/api/types.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/desktop.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/persistence.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/settings/search.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/en.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/es.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/ja.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/ko.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/pl.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/pt-BR.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/uk.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/zh-CN.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/ui/src/lib/i18n/messages/zh-TW.settings.ts`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/web/server/lib/opencode/settings-helpers.js`
++- `/home/roomhacker/agents-projects/apps/forks/openchamber/packages/web/server/lib/opencode/settings-helpers.test.js`
++
++## Behavior implemented
++
++- Store loads and saves resilience settings per active runtime.
++- Async load/save results are invalidated across runtime switches.
++- Pending writes from an old runtime cannot overwrite a newer runtime state.
++- Fallback model suggestions are discovered from the existing directory-scoped provider/config API.
++- UI copy explicitly states changes affect the next request only.
++- Shared `/api/config/settings` sanitizer now round-trips the resilience fields instead of dropping them.
++
++## Verification
++
++Passed:
++
++- `bun test packages/ui/src/stores/useResilienceSettingsStore.test.ts`
++  - `3 pass, 0 fail`
++- `bun test packages/web/server/lib/opencode/settings-helpers.test.js`
++  - `32 pass, 0 fail`
++
++UI type-check executed:
++
++- `bun run --cwd packages/ui type-check`
++
++Result:
++
++- failed, but remaining errors are outside this resilience slice and come from unrelated dirty work already present in the checkout, including:
++  - `src/components/chat/__tests__/failedMessageRecovery.test.tsx`
++  - `src/lib/i18n/bootstrap.ts`
++  - `src/lib/i18n/intl.ts`
++  - `src/lib/opencode/client.ts`
++  - `src/sync/session-recovery-actions.test.ts`
++
++After resilience fixes, the compiler blockers no longer point at:
++
++- `useResilienceSettingsStore.ts`
++- `ResilienceSettings.tsx`
++- resilience bridge sanitizer changes
++
++## Scope boundary and missing runtime contract
++
++This change persists and exposes resilience preferences through the existing OpenChamber runtime settings bridge only.
++
++I did not claim server-side enforcement of retries, timeouts, fallback order, or automatic resume inside OpenCode itself because this repository slice does not provide evidence of that enforcement contract. The implemented and tested boundary is:
++
++- OpenChamber UI/store persistence
++- bridge acceptance and round-tripping of the fields
++- next-request-only user messaging
++
++## Noted mismatch in the brief
++
++The brief names `packages/ui/src/lib/i18n/messages/ru.settings.ts`, but this checkout does not contain that file. The package also currently has broader missing-`ru` type-check errors in unrelated i18n files, which is consistent with the missing locale wiring being a pre-existing repository issue rather than part of this resilience slice.
+diff --git a/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx b/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx
+index d552495c..f589cb7c 100644
+--- a/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx
++++ b/packages/ui/src/components/sections/openchamber/OpenChamberPage.tsx
+@@ -10,6 +10,7 @@ import { GitHubSettings } from './GitHubSettings';
+ import { VoiceSettings } from './VoiceSettings';
+ import { TunnelSettings } from './TunnelSettings';
+ import { OpenCodeCliSettings } from './OpenCodeCliSettings';
++import { ResilienceSettings } from './ResilienceSettings';
+ import { DesktopNetworkSettings } from './DesktopNetworkSettings';
+ import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings';
+ import { SettingsPageLayout } from '@/components/sections/shared/SettingsPageLayout';
+@@ -52,6 +53,7 @@ export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section }) =>
+                 <DefaultsSettings />
+                 {showDesktopNetworkSettings && <DesktopNetworkSettings />}
+                 {!isVSCode && <OpenCodeCliSettings />}
++                {!isVSCode && <ResilienceSettings />}
+                 <SessionRetentionSettings />
+                 {isWebRuntime() && !isDesktopShell() && !isVSCode && !isCapacitorApp() && <PasskeySettings />}
+                 {showAbout && <AboutSettings />}
+@@ -144,6 +146,7 @@ const GeneralSectionContent: React.FC = () => {
+             {showDesktopNetworkSettings && <DesktopNetworkSettings />}
+             {showPasskeySettings && <PasskeySettings />}
+             {!isVSCode && <OpenCodeCliSettings />}
++            {!isVSCode && <ResilienceSettings />}
+             <OpenChamberVisualSettings visibleSettings={[
+                 'fileEditorKeymap',
+                 'expandedEditorToolbar',
+diff --git a/packages/ui/src/components/sections/openchamber/ResilienceSettings.tsx b/packages/ui/src/components/sections/openchamber/ResilienceSettings.tsx
+new file mode 100644
+index 00000000..d52381a5
+--- /dev/null
++++ b/packages/ui/src/components/sections/openchamber/ResilienceSettings.tsx
+@@ -0,0 +1,194 @@
++import * as React from 'react';
++
++import { Textarea } from '@/components/ui/textarea';
++import { NumberInput } from '@/components/ui/number-input';
++import {
++  SettingsCheckboxRow,
++  SettingsFieldRow,
++  SettingsInset,
++  SettingsSection,
++  SETTINGS_NUMBER_STEPPER_ROW_CLASS,
++  SETTINGS_NUMBER_UNIT_CLASS,
++  SETTINGS_OPTION_STACK_CLASS,
++} from '@/components/sections/shared/SettingsSection';
++import { useI18n } from '@/lib/i18n';
++import { getRuntimeKey } from '@/lib/runtime-switch';
++import { opencodeClient } from '@/lib/opencode/client';
++import { useProjectsStore } from '@/stores/useProjectsStore';
++import { useResilienceSettingsStore } from '@/stores/useResilienceSettingsStore';
++
++const fallbackModelIdsToText = (value: string[]): string => value.join('\n');
++
++const parseFallbackModelIds = (value: string): string[] => {
++  const seen = new Set<string>();
++  const next: string[] = [];
++  for (const line of value.split(/\r?\n/)) {
++    const modelId = line.trim();
++    if (!modelId || seen.has(modelId)) {
++      continue;
++    }
++    seen.add(modelId);
++    next.push(modelId);
++    if (next.length >= 16) {
++      break;
++    }
++  }
++  return next;
++};
++
++export const ResilienceSettings: React.FC = () => {
++  const { t } = useI18n();
++  const settings = useResilienceSettingsStore((state) => state.settings);
++  const availableFallbackModelIds = useResilienceSettingsStore((state) => state.availableFallbackModelIds);
++  const isLoading = useResilienceSettingsStore((state) => state.isLoading);
++  const save = useResilienceSettingsStore((state) => state.save);
++  const load = useResilienceSettingsStore((state) => state.load);
++  const activeProjectPath = useProjectsStore((state) => state.getActiveProject()?.path ?? null);
++  const runtimeKey = getRuntimeKey();
++  const currentDirectory = activeProjectPath ?? opencodeClient.getDirectory() ?? null;
++
++  const [fallbackDraft, setFallbackDraft] = React.useState(() => fallbackModelIdsToText(settings.fallbackModelIds));
++
++  React.useEffect(() => {
++    setFallbackDraft(fallbackModelIdsToText(settings.fallbackModelIds));
++  }, [settings.fallbackModelIds]);
++
++  React.useEffect(() => {
++    void load(currentDirectory);
++  }, [currentDirectory, load, runtimeKey]);
++
++  const handleFallbackBlur = React.useCallback(() => {
++    const next = parseFallbackModelIds(fallbackDraft);
++    if (fallbackModelIdsToText(next) === fallbackModelIdsToText(settings.fallbackModelIds)) {
++      return;
++    }
++    void save({ fallbackModelIds: next });
++  }, [fallbackDraft, save, settings.fallbackModelIds]);
++
++  return (
++    <SettingsSection
++      title={t('settings.openchamber.resilience.title')}
++      description={t('settings.openchamber.resilience.description')}
++      info={t('settings.openchamber.resilience.note.nextRequestOnly')}
++    >
++      <SettingsInset className={SETTINGS_OPTION_STACK_CLASS}>
++        <SettingsCheckboxRow
++          settingsItem="sessions.resilience.auto-resume"
++          checked={settings.autoResume}
++          onChange={(checked) => void save({ autoResume: checked })}
++          label={t('settings.openchamber.resilience.field.autoResume')}
++          ariaLabel={t('settings.openchamber.resilience.field.autoResumeAria')}
++          info={t('settings.openchamber.resilience.field.autoResumeHint')}
++          disabled={isLoading}
++        />
++
++        <SettingsCheckboxRow
++          settingsItem="sessions.resilience.fallback-enabled"
++          checked={settings.fallbackEnabled}
++          onChange={(checked) => void save({ fallbackEnabled: checked })}
++          label={t('settings.openchamber.resilience.field.fallbackEnabled')}
++          ariaLabel={t('settings.openchamber.resilience.field.fallbackEnabledAria')}
++          info={t('settings.openchamber.resilience.field.fallbackEnabledHint')}
++          disabled={isLoading}
++        />
++
++        <SettingsFieldRow
++          settingsItem="sessions.resilience.response-timeout"
++          label={t('settings.openchamber.resilience.field.responseTimeoutMs')}
++          info={t('settings.openchamber.resilience.field.responseTimeoutMsHint')}
++        >
++          <div className={SETTINGS_NUMBER_STEPPER_ROW_CLASS}>
++            <NumberInput
++              value={settings.responseTimeoutMs}
++              onValueChange={(value) => void save({ responseTimeoutMs: value })}
++              min={0}
++              step={1000}
++              className="w-24 tabular-nums"
++              disabled={isLoading}
++            />
++            <span className={SETTINGS_NUMBER_UNIT_CLASS}>ms</span>
++          </div>
++        </SettingsFieldRow>
++
++        <SettingsFieldRow
++          settingsItem="sessions.resilience.tool-timeout"
++          label={t('settings.openchamber.resilience.field.toolTimeoutMs')}
++          info={t('settings.openchamber.resilience.field.toolTimeoutMsHint')}
++        >
++          <div className={SETTINGS_NUMBER_STEPPER_ROW_CLASS}>
++            <NumberInput
++              value={settings.toolTimeoutMs}
++              onValueChange={(value) => void save({ toolTimeoutMs: value })}
++              min={0}
++              step={1000}
++              className="w-24 tabular-nums"
++              disabled={isLoading}
++            />
++            <span className={SETTINGS_NUMBER_UNIT_CLASS}>ms</span>
++          </div>
++        </SettingsFieldRow>
++
++        <SettingsFieldRow
++          settingsItem="sessions.resilience.retries"
++          label={t('settings.openchamber.resilience.field.retries')}
++          info={t('settings.openchamber.resilience.field.retriesHint')}
++        >
++          <NumberInput
++            value={settings.retries}
++            onValueChange={(value) => void save({ retries: value })}
++            min={0}
++            step={1}
++            className="w-20 tabular-nums"
++            disabled={isLoading}
++          />
++        </SettingsFieldRow>
++
++        <SettingsFieldRow
++          settingsItem="sessions.resilience.retry-delay"
++          label={t('settings.openchamber.resilience.field.retryDelayMs')}
++          info={t('settings.openchamber.resilience.field.retryDelayMsHint')}
++        >
++          <div className={SETTINGS_NUMBER_STEPPER_ROW_CLASS}>
++            <NumberInput
++              value={settings.retryDelayMs}
++              onValueChange={(value) => void save({ retryDelayMs: value })}
++              min={0}
++              step={250}
++              className="w-24 tabular-nums"
++              disabled={isLoading}
++            />
++            <span className={SETTINGS_NUMBER_UNIT_CLASS}>ms</span>
++          </div>
++        </SettingsFieldRow>
++
++        <SettingsFieldRow
++          settingsItem="sessions.resilience.fallback-model-ids"
++          label={t('settings.openchamber.resilience.field.fallbackModelIds')}
++          info={t('settings.openchamber.resilience.field.fallbackModelIdsHint')}
++          alignEnd={false}
++          controlClassName="w-full max-w-[28rem]"
++        >
++          <div className="w-full space-y-2">
++            <Textarea
++              simple
++              rows={4}
++              value={fallbackDraft}
++              onChange={(event) => setFallbackDraft(event.target.value)}
++              onBlur={handleFallbackBlur}
++              placeholder={t('settings.openchamber.resilience.field.fallbackModelIdsPlaceholder')}
++              disabled={isLoading || !settings.fallbackEnabled}
++              className="min-h-[7rem] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
++            />
++            {availableFallbackModelIds.length > 0 ? (
++              <p className="typography-meta text-muted-foreground">
++                {t('settings.openchamber.resilience.field.availableModelIds')}
++                {' '}
++                {availableFallbackModelIds.join(', ')}
++              </p>
++            ) : null}
++          </div>
++        </SettingsFieldRow>
++      </SettingsInset>
++    </SettingsSection>
++  );
++};
+diff --git a/packages/ui/src/lib/api/types.ts b/packages/ui/src/lib/api/types.ts
+index e97a1ada..3816d7a9 100644
+--- a/packages/ui/src/lib/api/types.ts
++++ b/packages/ui/src/lib/api/types.ts
+@@ -678,6 +678,13 @@ export interface SettingsPayload {
+   draftStarters?: DraftStarterRef[];
+   draftStartersVisible?: boolean;
+   draftStartersCraftGoalAdded?: boolean;
++  autoResume?: boolean;
++  retries?: number;
++  retryDelayMs?: number;
++  responseTimeoutMs?: number;
++  toolTimeoutMs?: number;
++  fallbackEnabled?: boolean;
++  fallbackModelIds?: string[];
+ 
+   [key: string]: unknown;
+ }
+diff --git a/packages/ui/src/lib/desktop.ts b/packages/ui/src/lib/desktop.ts
+index 8a4075e1..a12586a8 100644
+--- a/packages/ui/src/lib/desktop.ts
++++ b/packages/ui/src/lib/desktop.ts
+@@ -198,6 +198,13 @@ export type DesktopSettings = {
+   // Global behavior prompt — synced to ~/.config/opencode/AGENTS.md
+   globalBehaviorPrompt?: string;
+   responseStyleEnabled?: boolean;
++  autoResume?: boolean;
++  retries?: number;
++  retryDelayMs?: number;
++  responseTimeoutMs?: number;
++  toolTimeoutMs?: number;
++  fallbackEnabled?: boolean;
++  fallbackModelIds?: string[];
+   responseStylePreset?: 'concise' | 'detailed' | 'mentor' | 'pushback' | 'noFiller' | 'matchEnergy' | 'warmPeer' | 'custom';
+   responseStyleCustomInstructions?: string;
+   dictationEnabled?: boolean;
+diff --git a/packages/ui/src/lib/i18n/messages/en.settings.ts b/packages/ui/src/lib/i18n/messages/en.settings.ts
+index e689657e..e2837ee6 100644
+--- a/packages/ui/src/lib/i18n/messages/en.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/en.settings.ts
+@@ -996,6 +996,27 @@ export const settingsDict = {
+   'settings.openchamber.opencodeCli.dialog.selectBinaryTitle': 'Select opencode binary',
+   'settings.openchamber.opencodeCli.tipPrefix': 'Tip: you can also use',
+   'settings.openchamber.opencodeCli.tipMiddle': 'env var, but this setting persists in',
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+   'settings.mcp.sidebar.title': 'MCP Servers',
+   'settings.mcp.sidebar.total': 'Total {count}',
+   'settings.mcp.sidebar.actions.refreshStatusAria': 'Refresh MCP status',
+diff --git a/packages/ui/src/lib/i18n/messages/es.settings.ts b/packages/ui/src/lib/i18n/messages/es.settings.ts
+index b20fbfcb..a243a45c 100644
+--- a/packages/ui/src/lib/i18n/messages/es.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/es.settings.ts
+@@ -2022,4 +2022,25 @@ export const settingsDict = {
+   "settings.openchamber.visual.field.followUpBehaviorDescription": "Choose what happens when you press Enter on a follow-up message while the agent is still responding.",
+   "settings.openchamber.visual.option.followUpBehavior.steer.label": "Steer",
+   "settings.openchamber.visual.option.followUpBehavior.queue.label": "Queue",
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/i18n/messages/ja.settings.ts b/packages/ui/src/lib/i18n/messages/ja.settings.ts
+index cb8b4f66..432e5236 100644
+--- a/packages/ui/src/lib/i18n/messages/ja.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/ja.settings.ts
+@@ -2022,4 +2022,25 @@ export const settingsDict = {
+   'settings.openchamber.visual.field.followUpBehaviorDescription': 'エージェントが応答している間にフォローアップメッセージで Enter を押したときの動作を選択します。',
+   'settings.openchamber.visual.option.followUpBehavior.steer.label': 'ステア',
+   'settings.openchamber.visual.option.followUpBehavior.queue.label': 'キュー',
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/i18n/messages/ko.settings.ts b/packages/ui/src/lib/i18n/messages/ko.settings.ts
+index 266b0a35..b2389937 100644
+--- a/packages/ui/src/lib/i18n/messages/ko.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/ko.settings.ts
+@@ -2022,4 +2022,25 @@ export const settingsDict = {
+   'settings.openchamber.visual.field.followUpBehaviorDescription': 'Choose what happens when you press Enter on a follow-up message while the agent is still responding.',
+   'settings.openchamber.visual.option.followUpBehavior.steer.label': 'Steer',
+   'settings.openchamber.visual.option.followUpBehavior.queue.label': 'Queue',
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/i18n/messages/pl.settings.ts b/packages/ui/src/lib/i18n/messages/pl.settings.ts
+index 403d2868..81e56f43 100644
+--- a/packages/ui/src/lib/i18n/messages/pl.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/pl.settings.ts
+@@ -2014,4 +2014,25 @@ export const settingsDict = {
+   'settings.openchamber.visual.field.followUpBehaviorDescription': 'Choose what happens when you press Enter on a follow-up message while the agent is still responding.',
+   'settings.openchamber.visual.option.followUpBehavior.steer.label': 'Steer',
+   'settings.openchamber.visual.option.followUpBehavior.queue.label': 'Queue',
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ };
+diff --git a/packages/ui/src/lib/i18n/messages/pt-BR.settings.ts b/packages/ui/src/lib/i18n/messages/pt-BR.settings.ts
+index 62404469..0b28c946 100644
+--- a/packages/ui/src/lib/i18n/messages/pt-BR.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/pt-BR.settings.ts
+@@ -2022,4 +2022,25 @@ export const settingsDict = {
+   "settings.openchamber.visual.field.followUpBehaviorDescription": "Choose what happens when you press Enter on a follow-up message while the agent is still responding.",
+   "settings.openchamber.visual.option.followUpBehavior.steer.label": "Steer",
+   "settings.openchamber.visual.option.followUpBehavior.queue.label": "Queue",
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/i18n/messages/uk.settings.ts b/packages/ui/src/lib/i18n/messages/uk.settings.ts
+index a73d271a..f0c7d263 100644
+--- a/packages/ui/src/lib/i18n/messages/uk.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/uk.settings.ts
+@@ -2022,4 +2022,25 @@ export const settingsDict = {
+   "settings.openchamber.visual.field.followUpBehaviorDescription": "Choose what happens when you press Enter on a follow-up message while the agent is still responding.",
+   "settings.openchamber.visual.option.followUpBehavior.steer.label": "Steer",
+   "settings.openchamber.visual.option.followUpBehavior.queue.label": "Queue",
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/i18n/messages/zh-CN.settings.ts b/packages/ui/src/lib/i18n/messages/zh-CN.settings.ts
+index 0ce5ffb7..a0321604 100644
+--- a/packages/ui/src/lib/i18n/messages/zh-CN.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/zh-CN.settings.ts
+@@ -2022,4 +2022,25 @@ export const settingsDict = {
+   'settings.openchamber.visual.field.followUpBehaviorDescription': 'Choose what happens when you press Enter on a follow-up message while the agent is still responding.',
+   'settings.openchamber.visual.option.followUpBehavior.steer.label': 'Steer',
+   'settings.openchamber.visual.option.followUpBehavior.queue.label': 'Queue',
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/i18n/messages/zh-TW.settings.ts b/packages/ui/src/lib/i18n/messages/zh-TW.settings.ts
+index 59d59654..f89baca9 100644
+--- a/packages/ui/src/lib/i18n/messages/zh-TW.settings.ts
++++ b/packages/ui/src/lib/i18n/messages/zh-TW.settings.ts
+@@ -2022,4 +2022,25 @@
+   'settings.openchamber.visual.field.followUpBehaviorDescription': 'Choose what happens when you press Enter on a follow-up message while the agent is still responding.',
+   'settings.openchamber.visual.option.followUpBehavior.steer.label': 'Steer',
+   'settings.openchamber.visual.option.followUpBehavior.queue.label': 'Queue',
++  'settings.openchamber.resilience.title': 'OpenCode Resilience',
++  'settings.openchamber.resilience.description': 'Tune retries, timeouts, and fallback order for future OpenCode requests.',
++  'settings.openchamber.resilience.note.nextRequestOnly': 'Changes are saved through the current runtime settings bridge and apply to the next request, not work already in flight.',
++  'settings.openchamber.resilience.field.autoResume': 'Automatic resume + retry',
++  'settings.openchamber.resilience.field.autoResumeAria': 'Enable automatic resume and retry',
++  'settings.openchamber.resilience.field.autoResumeHint': 'When enabled, OpenCode may resume and retry the next request after a recoverable failure.',
++  'settings.openchamber.resilience.field.fallbackEnabled': 'Fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledAria': 'Enable fallback models',
++  'settings.openchamber.resilience.field.fallbackEnabledHint': 'Use the ordered fallback list only when the primary model fails.',
++  'settings.openchamber.resilience.field.responseTimeoutMs': 'Max AI response wait',
++  'settings.openchamber.resilience.field.responseTimeoutMsHint': 'Maximum time to wait for the model response before the current request is treated as timed out. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.toolTimeoutMs': 'Max tool wait',
++  'settings.openchamber.resilience.field.toolTimeoutMsHint': 'Maximum time to wait for tool execution inside a request. Set 0 to leave it disabled.',
++  'settings.openchamber.resilience.field.retries': 'Retry count',
++  'settings.openchamber.resilience.field.retriesHint': 'How many times the next request may retry after a recoverable failure.',
++  'settings.openchamber.resilience.field.retryDelayMs': 'Wait between retries',
++  'settings.openchamber.resilience.field.retryDelayMsHint': 'Delay between retry attempts for the next request.',
++  'settings.openchamber.resilience.field.fallbackModelIds': 'Ordered fallback model IDs',
++  'settings.openchamber.resilience.field.fallbackModelIdsHint': 'One model ID per line, in the exact order OpenCode should try them.',
++  'settings.openchamber.resilience.field.fallbackModelIdsPlaceholder': 'openai/gpt-4.1\nanthropic/claude-4-sonnet',
++  'settings.openchamber.resilience.field.availableModelIds': 'Available for this directory:',
+ } as const;
+diff --git a/packages/ui/src/lib/persistence.ts b/packages/ui/src/lib/persistence.ts
+index 7db5b302..e84999c1 100644
+--- a/packages/ui/src/lib/persistence.ts
++++ b/packages/ui/src/lib/persistence.ts
+@@ -70,6 +70,13 @@ const persistRuntimeSettingsMirror = (settings: DesktopSettings, runtimeKey: str
+     pwaAppName: settings.pwaAppName,
+     mobileKeyboardMode: settings.mobileKeyboardMode,
+     openCodeUpdateToastDismissedVersion: settings.openCodeUpdateToastDismissedVersion,
++    autoResume: settings.autoResume,
++    retries: settings.retries,
++    retryDelayMs: settings.retryDelayMs,
++    responseTimeoutMs: settings.responseTimeoutMs,
++    toolTimeoutMs: settings.toolTimeoutMs,
++    fallbackEnabled: settings.fallbackEnabled,
++    fallbackModelIds: settings.fallbackModelIds,
+     dictationEnabled: settings.dictationEnabled,
+     sttProvider: settings.sttProvider,
+     sttServerUrl: settings.sttServerUrl,
+@@ -592,6 +599,13 @@ const materializeAuthoritativeUiSettings = (settings: DesktopSettings): DesktopS
+     gitChangesViewMode: defaults.gitChangesViewMode,
+     directoryShowHidden: true,
+     filesViewShowGitignored: false,
++    autoResume: false,
++    retries: 0,
++    retryDelayMs: 0,
++    responseTimeoutMs: 0,
++    toolTimeoutMs: 0,
++    fallbackEnabled: false,
++    fallbackModelIds: [],
+     dictationEnabled: true,
+     sttProvider: 'local',
+     sttServerUrl: 'http://localhost:8001/v1',
+@@ -1529,6 +1543,40 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
+   if (typeof candidate.responseStyleEnabled === 'boolean') {
+     result.responseStyleEnabled = candidate.responseStyleEnabled;
+   }
++  if (typeof candidate.autoResume === 'boolean') {
++    result.autoResume = candidate.autoResume;
++  }
++  if (typeof candidate.retries === 'number' && Number.isFinite(candidate.retries)) {
++    result.retries = Math.max(0, Math.floor(candidate.retries));
++  }
++  if (typeof candidate.retryDelayMs === 'number' && Number.isFinite(candidate.retryDelayMs)) {
++    result.retryDelayMs = Math.max(0, Math.floor(candidate.retryDelayMs));
++  }
++  if (typeof candidate.responseTimeoutMs === 'number' && Number.isFinite(candidate.responseTimeoutMs)) {
++    result.responseTimeoutMs = Math.max(0, Math.floor(candidate.responseTimeoutMs));
++  }
++  if (typeof candidate.toolTimeoutMs === 'number' && Number.isFinite(candidate.toolTimeoutMs)) {
++    result.toolTimeoutMs = Math.max(0, Math.floor(candidate.toolTimeoutMs));
++  }
++  if (typeof candidate.fallbackEnabled === 'boolean') {
++    result.fallbackEnabled = candidate.fallbackEnabled;
++  }
++  if (Array.isArray(candidate.fallbackModelIds)) {
++    const seenFallbackModelIds = new Set<string>();
++    const fallbackModelIds: string[] = [];
++    for (const entry of candidate.fallbackModelIds) {
++      const modelId = typeof entry === 'string' ? entry.trim() : '';
++      if (!modelId || seenFallbackModelIds.has(modelId)) {
++        continue;
++      }
++      seenFallbackModelIds.add(modelId);
++      fallbackModelIds.push(modelId);
++      if (fallbackModelIds.length >= 16) {
++        break;
++      }
++    }
++    result.fallbackModelIds = fallbackModelIds;
++  }
+   if (
+     typeof candidate.responseStylePreset === 'string'
+     && (candidate.responseStylePreset === 'concise'
+diff --git a/packages/ui/src/lib/settings/search.ts b/packages/ui/src/lib/settings/search.ts
+index d8b74188..d83fba61 100644
+--- a/packages/ui/src/lib/settings/search.ts
++++ b/packages/ui/src/lib/settings/search.ts
+@@ -466,6 +466,62 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
+     keywords: ['agent', 'tool', 'orchestration', 'openchamber', 'sessions', 'schedule', 'control'],
+     isAvailable: (ctx) => !ctx.isVSCode,
+   },
++  {
++    id: 'sessions.resilience.auto-resume',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.autoResume',
++    descriptionKey: 'settings.openchamber.resilience.field.autoResumeHint',
++    keywords: ['retry', 'resume', 'recovery', 'resilience'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
++  {
++    id: 'sessions.resilience.fallback-enabled',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.fallbackEnabled',
++    descriptionKey: 'settings.openchamber.resilience.field.fallbackEnabledHint',
++    keywords: ['fallback', 'model', 'resilience', 'recovery'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
++  {
++    id: 'sessions.resilience.response-timeout',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.responseTimeoutMs',
++    descriptionKey: 'settings.openchamber.resilience.field.responseTimeoutMsHint',
++    keywords: ['timeout', 'response', 'wait', 'resilience'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
++  {
++    id: 'sessions.resilience.tool-timeout',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.toolTimeoutMs',
++    descriptionKey: 'settings.openchamber.resilience.field.toolTimeoutMsHint',
++    keywords: ['tool', 'timeout', 'wait', 'resilience'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
++  {
++    id: 'sessions.resilience.retries',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.retries',
++    descriptionKey: 'settings.openchamber.resilience.field.retriesHint',
++    keywords: ['retry', 'count', 'recovery', 'resilience'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
++  {
++    id: 'sessions.resilience.retry-delay',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.retryDelayMs',
++    descriptionKey: 'settings.openchamber.resilience.field.retryDelayMsHint',
++    keywords: ['retry', 'delay', 'backoff', 'resilience'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
++  {
++    id: 'sessions.resilience.fallback-model-ids',
++    page: 'general',
++    titleKey: 'settings.openchamber.resilience.field.fallbackModelIds',
++    descriptionKey: 'settings.openchamber.resilience.field.fallbackModelIdsHint',
++    keywords: ['fallback', 'models', 'ordered', 'resilience'],
++    isAvailable: (ctx) => !ctx.isVSCode,
++  },
+   {
+     id: 'git.github-account',
+     page: 'git',
+diff --git a/packages/ui/src/stores/useResilienceSettingsStore.test.ts b/packages/ui/src/stores/useResilienceSettingsStore.test.ts
+new file mode 100644
+index 00000000..2123471e
+--- /dev/null
++++ b/packages/ui/src/stores/useResilienceSettingsStore.test.ts
+@@ -0,0 +1,345 @@
++import { beforeEach, describe, expect, mock, test } from 'bun:test';
++
++import type { SettingsPayload } from '@/lib/api/types';
++import { getRuntimeKey, switchRuntimeEndpoint } from '@/lib/runtime-switch';
++
++type ResilienceSettingsPayload = {
++  autoResume?: unknown;
++  retries?: unknown;
++  retryDelayMs?: unknown;
++  responseTimeoutMs?: unknown;
++  toolTimeoutMs?: unknown;
++  fallbackEnabled?: unknown;
++  fallbackModelIds?: unknown;
++};
++
++type TestWindow = {
++  addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
++  removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
++  dispatchEvent: (event: Event) => boolean;
++  setTimeout: typeof setTimeout;
++  clearTimeout: typeof clearTimeout;
++};
++
++const DIRECTORY_A = '/workspace/project-a';
++const DIRECTORY_B = '/workspace/project-b';
++
++let createdWindow = false;
++let createdLocalStorage = false;
++
++const settingsByRuntime = new Map<string, ResilienceSettingsPayload>();
++const providerModelIdsByDirectory = new Map<string, string[]>();
++
++let runtimeFetchImpl: (input: string, init?: RequestInit) => Promise<Response> = async () =>
++  new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
++let updateDesktopSettingsImpl: (changes: Partial<SettingsPayload>) => Promise<void> = async () => undefined;
++
++const deferred = <T,>() => {
++  let resolve!: (value: T) => void;
++  let reject!: (error?: unknown) => void;
++  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
++    resolve = resolvePromise;
++    reject = rejectPromise;
++  });
++  return { promise, resolve, reject };
++};
++
++const responseWithJson = (value: unknown): Response =>
++  new Response(JSON.stringify(value), {
++    headers: { 'Content-Type': 'application/json' },
++  });
++
++const ensureLocalStorage = (): void => {
++  if (typeof localStorage !== 'undefined') {
++    return;
++  }
++
++  const values = new Map<string, string>();
++  Object.defineProperty(globalThis, 'localStorage', {
++    configurable: true,
++    writable: true,
++    value: {
++      getItem: (key: string) => values.get(key) ?? null,
++      setItem: (key: string, value: string) => {
++        values.set(key, value);
++      },
++      removeItem: (key: string) => {
++        values.delete(key);
++      },
++      clear: () => {
++        values.clear();
++      },
++    },
++  });
++  createdLocalStorage = true;
++};
++
++const ensureWindow = (): TestWindow => {
++  if (typeof window === 'undefined') {
++    Object.defineProperty(globalThis, 'window', {
++      configurable: true,
++      writable: true,
++      value: {},
++    });
++    createdWindow = true;
++  }
++
++  const scopedWindow = window as unknown as Partial<TestWindow>;
++  if (!scopedWindow.addEventListener || !scopedWindow.removeEventListener) {
++    const eventTarget = new EventTarget();
++    scopedWindow.addEventListener = eventTarget.addEventListener.bind(eventTarget);
++    scopedWindow.removeEventListener = eventTarget.removeEventListener.bind(eventTarget);
++    scopedWindow.dispatchEvent = eventTarget.dispatchEvent.bind(eventTarget);
++  }
++  scopedWindow.dispatchEvent ??= () => true;
++  scopedWindow.setTimeout ??= setTimeout;
++  scopedWindow.clearTimeout ??= clearTimeout;
++  ensureLocalStorage();
++  return scopedWindow as TestWindow;
++};
++
++mock.module('@/contexts/runtimeAPIRegistry', () => ({
++  getRegisteredRuntimeAPIs: mock(() => null),
++}));
++
++mock.module('@/lib/runtime-fetch', () => ({
++  runtimeFetch: mock(async (input: string | URL | Request, init?: RequestInit) => {
++    const url = typeof input === 'string'
++      ? input
++      : input instanceof URL
++        ? input.toString()
++        : input.url;
++    return runtimeFetchImpl(url, init);
++  }),
++}));
++
++mock.module('@/lib/persistence', () => ({
++  updateDesktopSettings: mock(async (changes: Partial<SettingsPayload>) => updateDesktopSettingsImpl(changes)),
++}));
++
++mock.module('@/lib/opencode/client', () => ({
++  opencodeClient: {
++    getProvidersForConfig: mock(async (directory?: string | null) => {
++      const ids = providerModelIdsByDirectory.get(directory ?? '') ?? [];
++      return {
++        providers: ids.map((id) => {
++          const [providerId, modelId] = id.split('/', 2);
++          return {
++            id: providerId,
++            name: providerId,
++            source: 'config',
++            env: [],
++            options: {},
++            models: [
++              {
++                id: modelId,
++                name: modelId,
++                providerID: providerId,
++                api: { id: 'chat', url: '', npm: '' },
++                capabilities: {
++                  temperature: true,
++                  reasoning: false,
++                  attachment: false,
++                  toolcall: true,
++                  input: { text: true, audio: false, image: false, video: false, pdf: false },
++                  output: { text: true, audio: false, image: false, video: false, pdf: false },
++                  interleaved: false,
++                },
++                cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
++                limit: { context: 0, output: 0 },
++                options: {},
++                release_date: '',
++                status: 'active',
++                headers: {},
++                attachment: false,
++                reasoning: false,
++                temperature: true,
++                tool_call: true,
++              },
++            ],
++          };
++        }),
++        default: {},
++      };
++    }),
++  },
++}));
++
++const { useResilienceSettingsStore, DEFAULT_RESILIENCE_SETTINGS } = await import('./useResilienceSettingsStore');
++
++describe('useResilienceSettingsStore', () => {
++  beforeEach(() => {
++    ensureWindow();
++    settingsByRuntime.clear();
++    providerModelIdsByDirectory.clear();
++    runtimeFetchImpl = async (input: string, init?: RequestInit) => {
++      if (input !== '/api/config/settings' || init?.method !== 'GET') {
++        return responseWithJson({});
++      }
++      return responseWithJson(settingsByRuntime.get(getRuntimeKey()) ?? {});
++    };
++    updateDesktopSettingsImpl = async () => undefined;
++
++    switchRuntimeEndpoint({ apiBaseUrl: 'https://runtime-a.example', runtimeKey: 'runtime-a' });
++
++    useResilienceSettingsStore.setState({
++      settings: DEFAULT_RESILIENCE_SETTINGS,
++      availableFallbackModelIds: [],
++      isLoading: false,
++      isSaving: false,
++      runtimeKey: null,
++      directory: null,
++    });
++  });
++
++  test('loads persisted settings and directory-scoped fallback model choices', async () => {
++    settingsByRuntime.set('runtime-a', {
++      autoResume: true,
++      retries: 2,
++      retryDelayMs: 1500,
++      responseTimeoutMs: 30000,
++      toolTimeoutMs: 45000,
++      fallbackEnabled: true,
++      fallbackModelIds: ['openai/gpt-4.1', 'anthropic/claude-4-sonnet'],
++    });
++    providerModelIdsByDirectory.set(DIRECTORY_A, [
++      'openai/gpt-4.1',
++      'anthropic/claude-4-sonnet',
++    ]);
++    providerModelIdsByDirectory.set(DIRECTORY_B, ['google/gemini-2.5-pro']);
++
++    await useResilienceSettingsStore.getState().load(DIRECTORY_A);
++
++    expect(useResilienceSettingsStore.getState().settings).toEqual({
++      autoResume: true,
++      retries: 2,
++      retryDelayMs: 1500,
++      responseTimeoutMs: 30000,
++      toolTimeoutMs: 45000,
++      fallbackEnabled: true,
++      fallbackModelIds: ['openai/gpt-4.1', 'anthropic/claude-4-sonnet'],
++    });
++    expect(useResilienceSettingsStore.getState().availableFallbackModelIds).toEqual([
++      'openai/gpt-4.1',
++      'anthropic/claude-4-sonnet',
++    ]);
++
++    await useResilienceSettingsStore.getState().load(DIRECTORY_B);
++
++    expect(useResilienceSettingsStore.getState().availableFallbackModelIds).toEqual([
++      'google/gemini-2.5-pro',
++    ]);
++    expect(useResilienceSettingsStore.getState().directory).toBe(DIRECTORY_B);
++  });
++
++  test('ignores stale load results after a runtime switch', async () => {
++    const runtimeALoad = deferred<Response>();
++    settingsByRuntime.set('runtime-b', {
++      autoResume: false,
++      retries: 1,
++      retryDelayMs: 500,
++      responseTimeoutMs: 12000,
++      toolTimeoutMs: 18000,
++      fallbackEnabled: false,
++      fallbackModelIds: ['google/gemini-2.5-pro'],
++    });
++    providerModelIdsByDirectory.set(DIRECTORY_A, ['openai/gpt-4.1']);
++    providerModelIdsByDirectory.set(DIRECTORY_B, ['google/gemini-2.5-pro']);
++
++    runtimeFetchImpl = async (input: string, init?: RequestInit) => {
++      if (input !== '/api/config/settings' || init?.method !== 'GET') {
++        return responseWithJson({});
++      }
++      if (getRuntimeKey() === 'runtime-a') {
++        return runtimeALoad.promise;
++      }
++      return responseWithJson(settingsByRuntime.get('runtime-b') ?? {});
++    };
++
++    const loadA = useResilienceSettingsStore.getState().load(DIRECTORY_A);
++
++    switchRuntimeEndpoint({ apiBaseUrl: 'https://runtime-b.example', runtimeKey: 'runtime-b' });
++    const loadB = useResilienceSettingsStore.getState().load(DIRECTORY_B);
++
++    runtimeALoad.resolve(responseWithJson({
++      autoResume: true,
++      retries: 9,
++      retryDelayMs: 9000,
++      responseTimeoutMs: 90000,
++      toolTimeoutMs: 91000,
++      fallbackEnabled: true,
++      fallbackModelIds: ['openai/gpt-4.1'],
++    }));
++
++    await Promise.all([loadA, loadB]);
++
++    expect(useResilienceSettingsStore.getState().runtimeKey).toBe('runtime-b');
++    expect(useResilienceSettingsStore.getState().directory).toBe(DIRECTORY_B);
++    expect(useResilienceSettingsStore.getState().settings.retries).toBe(1);
++    expect(useResilienceSettingsStore.getState().availableFallbackModelIds).toEqual([
++      'google/gemini-2.5-pro',
++    ]);
++  });
++
++  test('pending save from a previous runtime does not overwrite next-runtime state', async () => {
++    const runtimeASave = deferred<void>();
++
++    settingsByRuntime.set('runtime-a', {
++      autoResume: false,
++      retries: 0,
++      retryDelayMs: 0,
++      responseTimeoutMs: 0,
++      toolTimeoutMs: 0,
++      fallbackEnabled: false,
++      fallbackModelIds: [],
++    });
++    settingsByRuntime.set('runtime-b', {
++      autoResume: true,
++      retries: 1,
++      retryDelayMs: 250,
++      responseTimeoutMs: 10000,
++      toolTimeoutMs: 20000,
++      fallbackEnabled: true,
++      fallbackModelIds: ['google/gemini-2.5-pro'],
++    });
++    providerModelIdsByDirectory.set(DIRECTORY_A, ['openai/gpt-4.1']);
++    providerModelIdsByDirectory.set(DIRECTORY_B, ['google/gemini-2.5-pro']);
++
++    updateDesktopSettingsImpl = async (changes: Partial<SettingsPayload>) => {
++      expect(changes).toEqual({
++        retries: 5,
++        fallbackEnabled: true,
++        fallbackModelIds: ['openai/gpt-4.1'],
++      });
++      if (getRuntimeKey() === 'runtime-a') {
++        await runtimeASave.promise;
++      }
++    };
++
++    await useResilienceSettingsStore.getState().load(DIRECTORY_A);
++    const savePromise = useResilienceSettingsStore.getState().save({
++      retries: 5,
++      fallbackEnabled: true,
++      fallbackModelIds: ['openai/gpt-4.1'],
++    });
++
++    switchRuntimeEndpoint({ apiBaseUrl: 'https://runtime-b.example', runtimeKey: 'runtime-b' });
++    await useResilienceSettingsStore.getState().load(DIRECTORY_B);
++
++    runtimeASave.resolve();
++    await savePromise;
++
++    expect(useResilienceSettingsStore.getState().runtimeKey).toBe('runtime-b');
++    expect(useResilienceSettingsStore.getState().directory).toBe(DIRECTORY_B);
++    expect(useResilienceSettingsStore.getState().settings).toEqual({
++      autoResume: true,
++      retries: 1,
++      retryDelayMs: 250,
++      responseTimeoutMs: 10000,
++      toolTimeoutMs: 20000,
++      fallbackEnabled: true,
++      fallbackModelIds: ['google/gemini-2.5-pro'],
++    });
++  });
++});
++
+diff --git a/packages/ui/src/stores/useResilienceSettingsStore.ts b/packages/ui/src/stores/useResilienceSettingsStore.ts
+new file mode 100644
+index 00000000..7555fa88
+--- /dev/null
++++ b/packages/ui/src/stores/useResilienceSettingsStore.ts
+@@ -0,0 +1,354 @@
++import { create } from 'zustand';
++
++import type { DesktopSettings } from '@/lib/desktop';
++import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
++import { opencodeClient } from '@/lib/opencode/client';
++import { updateDesktopSettings } from '@/lib/persistence';
++import { runtimeFetch } from '@/lib/runtime-fetch';
++import { getRuntimeKey, subscribeRuntimeEndpointChanged } from '@/lib/runtime-switch';
++
++export type ResilienceSettings = {
++  autoResume: boolean;
++  retries: number;
++  retryDelayMs: number;
++  responseTimeoutMs: number;
++  toolTimeoutMs: number;
++  fallbackEnabled: boolean;
++  fallbackModelIds: string[];
++};
++
++export type ResilienceSettingsStore = {
++  settings: ResilienceSettings;
++  availableFallbackModelIds: string[];
++  isLoading: boolean;
++  isSaving: boolean;
++  runtimeKey: string | null;
++  directory: string | null;
++  load: (directory?: string | null) => Promise<void>;
++  save: (changes: Partial<ResilienceSettings>) => Promise<void>;
++};
++
++const FALLBACK_MODEL_IDS_LIMIT = 16;
++
++export const DEFAULT_RESILIENCE_SETTINGS: ResilienceSettings = {
++  autoResume: false,
++  retries: 0,
++  retryDelayMs: 0,
++  responseTimeoutMs: 0,
++  toolTimeoutMs: 0,
++  fallbackEnabled: false,
++  fallbackModelIds: [],
++};
++
++const normalizeNonNegativeInteger = (value: unknown, fallback: number): number => {
++  if (typeof value !== 'number' || !Number.isFinite(value)) {
++    return fallback;
++  }
++  return Math.max(0, Math.floor(value));
++};
++
++const normalizeFallbackModelIds = (value: unknown): string[] => {
++  if (!Array.isArray(value)) {
++    return [];
++  }
++
++  const seen = new Set<string>();
++  const next: string[] = [];
++  for (const entry of value) {
++    const modelId = typeof entry === 'string' ? entry.trim() : '';
++    if (!modelId || seen.has(modelId)) {
++      continue;
++    }
++    seen.add(modelId);
++    next.push(modelId);
++    if (next.length >= FALLBACK_MODEL_IDS_LIMIT) {
++      break;
++    }
++  }
++  return next;
++};
++
++export const normalizeResilienceSettings = (payload: unknown): ResilienceSettings => {
++  const candidate = payload && typeof payload === 'object'
++    ? payload as Record<string, unknown>
++    : {};
++
++  return {
++    autoResume: candidate.autoResume === true,
++    retries: normalizeNonNegativeInteger(candidate.retries, DEFAULT_RESILIENCE_SETTINGS.retries),
++    retryDelayMs: normalizeNonNegativeInteger(candidate.retryDelayMs, DEFAULT_RESILIENCE_SETTINGS.retryDelayMs),
++    responseTimeoutMs: normalizeNonNegativeInteger(candidate.responseTimeoutMs, DEFAULT_RESILIENCE_SETTINGS.responseTimeoutMs),
++    toolTimeoutMs: normalizeNonNegativeInteger(candidate.toolTimeoutMs, DEFAULT_RESILIENCE_SETTINGS.toolTimeoutMs),
++    fallbackEnabled: candidate.fallbackEnabled === true,
++    fallbackModelIds: normalizeFallbackModelIds(candidate.fallbackModelIds),
++  };
++};
++
++const RESILIENCE_SETTING_KEYS = [
++  'autoResume',
++  'retries',
++  'retryDelayMs',
++  'responseTimeoutMs',
++  'toolTimeoutMs',
++  'fallbackEnabled',
++  'fallbackModelIds',
++] as const satisfies readonly (keyof ResilienceSettings)[];
++
++const pickChangedResilienceSettings = (
++  baseline: ResilienceSettings,
++  changes: Partial<ResilienceSettings>,
++): Partial<ResilienceSettings> => {
++  const merged = normalizeResilienceSettings({ ...baseline, ...changes });
++  const next: Partial<ResilienceSettings> = {};
++
++  for (const key of RESILIENCE_SETTING_KEYS) {
++    if (!(key in changes)) {
++      continue;
++    }
++
++    switch (key) {
++      case 'autoResume':
++        next.autoResume = merged.autoResume;
++        break;
++      case 'retries':
++        next.retries = merged.retries;
++        break;
++      case 'retryDelayMs':
++        next.retryDelayMs = merged.retryDelayMs;
++        break;
++      case 'responseTimeoutMs':
++        next.responseTimeoutMs = merged.responseTimeoutMs;
++        break;
++      case 'toolTimeoutMs':
++        next.toolTimeoutMs = merged.toolTimeoutMs;
++        break;
++      case 'fallbackEnabled':
++        next.fallbackEnabled = merged.fallbackEnabled;
++        break;
++      case 'fallbackModelIds':
++        next.fallbackModelIds = merged.fallbackModelIds;
++        break;
++    }
++  }
++
++  return next;
++};
++
++const toDesktopSettingsPatch = (settings: Partial<ResilienceSettings>): Partial<DesktopSettings> => {
++  const patch: Partial<DesktopSettings> = {};
++
++  for (const key of RESILIENCE_SETTING_KEYS) {
++    if (!(key in settings)) {
++      continue;
++    }
++
++    switch (key) {
++      case 'autoResume':
++        patch.autoResume = settings.autoResume;
++        break;
++      case 'retries':
++        patch.retries = settings.retries;
++        break;
++      case 'retryDelayMs':
++        patch.retryDelayMs = settings.retryDelayMs;
++        break;
++      case 'responseTimeoutMs':
++        patch.responseTimeoutMs = settings.responseTimeoutMs;
++        break;
++      case 'toolTimeoutMs':
++        patch.toolTimeoutMs = settings.toolTimeoutMs;
++        break;
++      case 'fallbackEnabled':
++        patch.fallbackEnabled = settings.fallbackEnabled;
++        break;
++      case 'fallbackModelIds':
++        patch.fallbackModelIds = settings.fallbackModelIds;
++        break;
++    }
++  }
++
++  return patch;
++};
++
++const readResilienceSettings = async (): Promise<ResilienceSettings> => {
++  const runtimeSettings = getRegisteredRuntimeAPIs()?.settings;
++  if (runtimeSettings) {
++    try {
++      const result = await runtimeSettings.load();
++      return normalizeResilienceSettings(result?.settings);
++    } catch (error) {
++      console.warn('Failed to load resilience settings from runtime settings API:', error);
++    }
++  }
++
++  try {
++    const response = await runtimeFetch('/api/config/settings', {
++      method: 'GET',
++      headers: { Accept: 'application/json' },
++    });
++    if (!response.ok) {
++      return DEFAULT_RESILIENCE_SETTINGS;
++    }
++    const payload = await response.json().catch(() => null);
++    return normalizeResilienceSettings(payload);
++  } catch (error) {
++    console.warn('Failed to load resilience settings from runtime settings route:', error);
++    return DEFAULT_RESILIENCE_SETTINGS;
++  }
++};
++
++const listAvailableFallbackModelIds = async (directory?: string | null): Promise<string[]> => {
++  try {
++    const response = await opencodeClient.getProvidersForConfig(directory);
++    const providers = Array.isArray(response?.providers) ? response.providers : [];
++    const seen = new Set<string>();
++    const ids: string[] = [];
++
++    for (const provider of providers) {
++      if (!provider || typeof provider !== 'object') {
++        continue;
++      }
++      const providerId = typeof provider.id === 'string' ? provider.id.trim() : '';
++      if (!providerId) {
++        continue;
++      }
++      const models = Array.isArray(provider.models)
++        ? provider.models
++        : provider.models && typeof provider.models === 'object'
++          ? Object.values(provider.models)
++          : [];
++
++      for (const model of models) {
++        if (!model || typeof model !== 'object') {
++          continue;
++        }
++        const modelId = typeof (model as { id?: unknown }).id === 'string'
++          ? (model as { id: string }).id.trim()
++          : '';
++        if (!modelId) {
++          continue;
++        }
++        const compositeId = `${providerId}/${modelId}`;
++        if (seen.has(compositeId)) {
++          continue;
++        }
++        seen.add(compositeId);
++        ids.push(compositeId);
++      }
++    }
++
++    return ids;
++  } catch (error) {
++    console.warn('Failed to load fallback model catalog for resilience settings:', error);
++    return [];
++  }
++};
++
++let lifecycleInitialized = false;
++let loadGeneration = 0;
++let saveGeneration = 0;
++
++const invalidatePendingOperations = (): void => {
++  loadGeneration += 1;
++  saveGeneration += 1;
++};
++
++const ensureLifecycle = (): void => {
++  if (lifecycleInitialized) {
++    return;
++  }
++  lifecycleInitialized = true;
++
++  subscribeRuntimeEndpointChanged(() => {
++    invalidatePendingOperations();
++    useResilienceSettingsStore.setState({
++      isLoading: false,
++      isSaving: false,
++      runtimeKey: getRuntimeKey(),
++    });
++  });
++
++  if (typeof window !== 'undefined') {
++    window.addEventListener('openchamber:settings-synced', (event: Event) => {
++      const detail = (event as CustomEvent<DesktopSettings>).detail;
++      if (!detail || typeof detail !== 'object') {
++        return;
++      }
++      useResilienceSettingsStore.setState((state) => ({
++        settings: normalizeResilienceSettings({ ...state.settings, ...detail }),
++        isSaving: false,
++      }));
++    });
++  }
++};
++
++export const useResilienceSettingsStore = create<ResilienceSettingsStore>((set, get) => ({
++  settings: DEFAULT_RESILIENCE_SETTINGS,
++  availableFallbackModelIds: [],
++  isLoading: false,
++  isSaving: false,
++  runtimeKey: null,
++  directory: null,
++
++  load: async (directory) => {
++    ensureLifecycle();
++    const normalizedDirectory = typeof directory === 'string' && directory.trim().length > 0
++      ? directory.trim()
++      : null;
++    const runtimeKey = getRuntimeKey();
++    const generation = ++loadGeneration;
++
++    set({
++      isLoading: true,
++      runtimeKey,
++      directory: normalizedDirectory,
++    });
++
++    const [settings, availableFallbackModelIds] = await Promise.all([
++      readResilienceSettings(),
++      listAvailableFallbackModelIds(normalizedDirectory),
++    ]);
++
++    if (generation !== loadGeneration || runtimeKey !== getRuntimeKey()) {
++      return;
++    }
++
++    set({
++      settings,
++      availableFallbackModelIds,
++      isLoading: false,
++      runtimeKey,
++      directory: normalizedDirectory,
++    });
++  },
++
++  save: async (changes) => {
++    ensureLifecycle();
++    const baseline = get().settings;
++    const nextSettings = normalizeResilienceSettings({ ...baseline, ...changes });
++    const changedSettings = pickChangedResilienceSettings(baseline, changes);
++    const runtimeKey = getRuntimeKey();
++    const generation = ++saveGeneration;
++
++    set({
++      settings: nextSettings,
++      isSaving: true,
++      runtimeKey,
++    });
++
++    if (Object.keys(changedSettings).length === 0) {
++      if (generation === saveGeneration && runtimeKey === getRuntimeKey()) {
++        set({ isSaving: false });
++      }
++      return;
++    }
++
++    try {
++      await updateDesktopSettings(toDesktopSettingsPatch(changedSettings));
++    } finally {
++      if (generation === saveGeneration && runtimeKey === getRuntimeKey()) {
++        set({ isSaving: false });
++      }
++    }
++  },
++}));
+diff --git a/packages/web/server/lib/opencode/settings-helpers.js b/packages/web/server/lib/opencode/settings-helpers.js
+index b95e1145..aef302d3 100644
+--- a/packages/web/server/lib/opencode/settings-helpers.js
++++ b/packages/web/server/lib/opencode/settings-helpers.js
+@@ -22,6 +22,7 @@ export const createSettingsHelpers = (dependencies) => {
+   const STT_MODEL_MAX_LENGTH = 256;
+   const STT_LANGUAGE_MAX_LENGTH = 64;
+   const VERSION_STRING_MAX_LENGTH = 128;
++  const FALLBACK_MODEL_IDS_MAX = 16;
+   const SHORTCUT_OVERRIDE_KEY_MAX_LENGTH = 128;
+   const SHORTCUT_OVERRIDE_VALUE_MAX_LENGTH = 128;
+   const PWA_ORIENTATION_VALUES = new Set(['system', 'portrait', 'landscape']);
+@@ -788,6 +789,31 @@ export const createSettingsHelpers = (dependencies) => {
+     if (typeof candidate.responseStyleEnabled === 'boolean') {
+       result.responseStyleEnabled = candidate.responseStyleEnabled;
+     }
++    if (typeof candidate.autoResume === 'boolean') {
++      result.autoResume = candidate.autoResume;
++    }
++    if (typeof candidate.retries === 'number' && Number.isFinite(candidate.retries)) {
++      result.retries = Math.max(0, Math.floor(candidate.retries));
++    }
++    if (typeof candidate.retryDelayMs === 'number' && Number.isFinite(candidate.retryDelayMs)) {
++      result.retryDelayMs = Math.max(0, Math.floor(candidate.retryDelayMs));
++    }
++    if (typeof candidate.responseTimeoutMs === 'number' && Number.isFinite(candidate.responseTimeoutMs)) {
++      result.responseTimeoutMs = Math.max(0, Math.floor(candidate.responseTimeoutMs));
++    }
++    if (typeof candidate.toolTimeoutMs === 'number' && Number.isFinite(candidate.toolTimeoutMs)) {
++      result.toolTimeoutMs = Math.max(0, Math.floor(candidate.toolTimeoutMs));
++    }
++    if (typeof candidate.fallbackEnabled === 'boolean') {
++      result.fallbackEnabled = candidate.fallbackEnabled;
++    }
++    if (Array.isArray(candidate.fallbackModelIds)) {
++      const fallbackModelIds = normalizeStringArray(candidate.fallbackModelIds)
++        .map((value) => (typeof value === 'string' ? value.trim() : ''))
++        .filter((value) => value.length > 0)
++        .slice(0, FALLBACK_MODEL_IDS_MAX);
++      result.fallbackModelIds = Array.from(new Set(fallbackModelIds));
++    }
+ 
+     if (
+       typeof candidate.responseStylePreset === 'string' &&
+diff --git a/packages/web/server/lib/opencode/settings-helpers.test.js b/packages/web/server/lib/opencode/settings-helpers.test.js
+index 20387b55..1f2e15a1 100644
+--- a/packages/web/server/lib/opencode/settings-helpers.test.js
++++ b/packages/web/server/lib/opencode/settings-helpers.test.js
+@@ -94,6 +94,28 @@ describe('settings helpers', () => {
+     expect(helpers.sanitizeSettingsUpdate({ messageStreamTransport: 'websocket' })).toEqual({});
+   });
+ 
++  it('accepts resilience settings through the shared settings bridge', () => {
++    const helpers = createTestHelpersWithRealSanitizers();
++
++    expect(helpers.sanitizeSettingsUpdate({
++      autoResume: true,
++      retries: 2,
++      retryDelayMs: 1500,
++      responseTimeoutMs: 30000,
++      toolTimeoutMs: 45000,
++      fallbackEnabled: true,
++      fallbackModelIds: [' openai/gpt-4.1 ', 'anthropic/claude-4-sonnet', 'openai/gpt-4.1'],
++    })).toEqual({
++      autoResume: true,
++      retries: 2,
++      retryDelayMs: 1500,
++      responseTimeoutMs: 30000,
++      toolTimeoutMs: 45000,
++      fallbackEnabled: true,
++      fallbackModelIds: ['openai/gpt-4.1', 'anthropic/claude-4-sonnet'],
++    });
++  });
++
+   it('sanitizes the persisted terminal shell', () => {
+     const helpers = createTestHelpers();
+ 
+-- 
+2.34.1

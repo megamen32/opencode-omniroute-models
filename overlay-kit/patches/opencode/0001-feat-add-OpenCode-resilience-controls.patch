@@ -1,0 +1,1311 @@
+From 30aed7bdacbb773e88ce26cb32eb58a635892f08 Mon Sep 17 00:00:00 2001
+From: roomhackerfrom100 <megamen932@gmai.com>
+Date: Mon, 27 Jul 2026 18:37:04 +0300
+Subject: [PATCH] feat: add OpenCode resilience controls
+
+---
+ .superpowers/sdd/task-1-report.md             | 111 +++++
+ packages/core/src/aisdk.ts                    |  12 +-
+ packages/core/src/config.ts                   |   8 +-
+ packages/core/src/config/resilience.ts        |  63 +++
+ packages/core/src/session/runner/llm.ts       | 361 +++++++++-----
+ .../src/session/runner/publish-llm-event.ts   |   4 +
+ packages/core/test/resilience-config.test.ts  |  47 ++
+ packages/core/test/session-resilience.test.ts | 471 ++++++++++++++++++
+ packages/schema/src/session-event.ts          |  11 +
+ 9 files changed, 949 insertions(+), 139 deletions(-)
+ create mode 100644 .superpowers/sdd/task-1-report.md
+ create mode 100644 packages/core/src/config/resilience.ts
+ create mode 100644 packages/core/test/resilience-config.test.ts
+ create mode 100644 packages/core/test/session-resilience.test.ts
+
+diff --git a/.superpowers/sdd/task-1-report.md b/.superpowers/sdd/task-1-report.md
+new file mode 100644
+index 0000000000..1405f4daf9
+--- /dev/null
++++ b/.superpowers/sdd/task-1-report.md
+@@ -0,0 +1,111 @@
++# Task 1 Report: OpenCode resilience configuration and runtime contract
++
++## Source requirements
++
++- Source brief: `/home/roomhacker/agents-projects/apps/forks/openchamber/.superpowers/sdd/task-1-brief.md`
++- Work root: `/home/roomhacker/agents-projects/apps/forks/opencode`
++- Scope constraint honored: no OpenChamber or OmniRoute files were edited.
++- Server bridge status: no server endpoint or bridge route was added. The implementation is limited to proven OpenCode v2 config/runtime paths.
++
++## Implementation summary
++
++Added an OpenCode v2 resilience contract:
++
++- `packages/core/src/config/resilience.ts`
++  - Defines `ConfigResilience.Info`.
++  - Defines conservative safe defaults:
++    - `responseTimeoutMs: 0`
++    - `toolTimeoutMs: 0`
++    - `retries: 0`
++    - `retryDelayMs: 0`
++    - `autoResume: false`
++    - `fallbackModels: []`
++  - Uses `0` as the disabled timeout value; positive values enable response/tool ceilings.
++  - Preserves fallback model strings exactly at config decode time.
++  - Defines `RuntimeMetadata` with `attempt`, `selectedModel`, `actualModel`, and `fallbackUsed`.
++
++- `packages/core/src/config.ts`
++  - Wires `resilience` into `Config.Info`.
++  - Uses the repository-local `optional(...)` schema helper with a decode default to preserve existing constructor compatibility while still decoding absent config to defaults.
++  - Preserves existing `mcp.timeout.startup` and `mcp.timeout.request` config fields.
++
++- `packages/core/src/aisdk.ts`
++  - Reads `Config.Service` opportunistically when available.
++  - Applies configured positive `responseTimeoutMs` to AI SDK provider option preparation.
++  - Does not require Config for existing AISDK consumers.
++
++- `packages/core/src/session/runner/llm.ts`
++  - Applies `responseTimeoutMs` at the provider stream/run boundary.
++  - Retries only uncommitted retryable provider failures.
++  - Sleeps exactly `retryDelayMs` between retry/fallback attempts.
++  - Tries configured fallback models in order after the configured retry bound for a model is exhausted.
++  - Does not retry after assistant output/tool call state has been committed.
++  - Applies `toolTimeoutMs` to local session tool settlement only; MCP startup/request timeout fields are not reused or replaced.
++
++- `packages/core/src/session/runner/publish-llm-event.ts`
++  - Carries resilience runtime metadata into step started/failed publications.
++
++- `packages/schema/src/session-event.ts`
++  - Adds optional resilience runtime metadata to Step Started, Step Ended, and Step Failed event schemas.
++
++## Tests added
++
++- `packages/core/test/resilience-config.test.ts`
++  - Absent config decodes to safe defaults.
++  - Negative retry/delay controls fail.
++  - Negative timeout controls fail while `0` remains the disabled value.
++  - Fallback model IDs preserve exact strings, including `minimax/MiniMax-M3:512k`.
++
++- `packages/core/test/session-resilience.test.ts`
++  - Bounded retries with exact configured delay.
++  - Fallback order after retryable failures.
++  - Response timeout classification and MCP timeout preservation.
++  - No retry after committed/uncertain assistant output.
++  - Local tool settlement timeout.
++  - No retry for non-retryable provider failures.
++
++## RED evidence
++
++- `bun test packages/core/test/resilience-config.test.ts` from repo root failed before implementation because this checkout has the root test guard:
++  - `Failed to scan non-existent root directory for tests: ".../opencode/do-not-run-tests-from-root"`
++- Equivalent package-local RED command:
++  - Command: `bun test test/resilience-config.test.ts`
++  - Workdir: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core`
++  - Result before implementation: failed because `@opencode-ai/core/config/resilience` did not exist.
++- Runtime RED command:
++  - Command: `bun test test/session-resilience.test.ts`
++  - Workdir: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core`
++  - Result before implementation: failed because `@opencode-ai/core/config/resilience` did not exist.
++
++## GREEN evidence
++
++- Focused tests:
++  - Command: `bun test test/resilience-config.test.ts test/session-resilience.test.ts`
++  - Workdir: `/home/roomhacker/agents-projects/apps/forks/opencode/packages/core`
++  - Result: `10 pass, 0 fail, 26 expect() calls`
++
++- Brief type-check command:
++  - Command: `bun run --cwd packages/core type-check`
++  - Workdir: `/home/roomhacker/agents-projects/apps/forks/opencode`
++  - Result: failed because this checkout has no `type-check` script.
++
++- Actual package type-check script:
++  - Command: `bun run --cwd packages/core typecheck`
++  - Workdir: `/home/roomhacker/agents-projects/apps/forks/opencode`
++  - Result: passed (`tsgo --noEmit`)
++
++## Scope and propagation notes
++
++- Config propagation is proven only for:
++  - `Config.Info` decoding.
++  - Optional `Config.Service` lookup in `AISDK`.
++  - V2 `SessionRunnerLLM` runtime behavior.
++- No claim is made that server endpoints, OpenChamber, OmniRoute, legacy session runtime paths, or external deployments consume this config.
++- `autoResume` is decoded and typed as part of the contract, but no automatic recovery/resume workflow was added in this task.
++
++## Concerns
++
++- The Task 1 brief names two commands that drift from this checkout:
++  - Root `bun test packages/core/...` is blocked by `do-not-run-tests-from-root`.
++  - `bun run --cwd packages/core type-check` is stale; the actual script is `typecheck`.
++- The event schema change lives in `packages/schema/src/session-event.ts`; this is inside the OpenCode fork and is necessary for typed session event/UI metadata, but it is broader than the core-only file list in the brief.
+diff --git a/packages/core/src/aisdk.ts b/packages/core/src/aisdk.ts
+index b604dac664..74c1cab8b4 100644
+--- a/packages/core/src/aisdk.ts
++++ b/packages/core/src/aisdk.ts
+@@ -6,6 +6,8 @@ import { Cause, Context, Effect, Layer, Schema, Scope } from "effect"
+ import { ModelV2 } from "./model"
+ import { ProviderV2 } from "./provider"
+ import { State } from "./state"
++import { Config } from "./config"
++import { ConfigResilience } from "./config/resilience"
+ 
+ type SDK = any
+ 
+@@ -71,13 +73,14 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+   })
+ }
+ 
+-function prepareOptions(model: ModelV2.Info, pkg: string) {
++function prepareOptions(model: ModelV2.Info, pkg: string, resilience: ConfigResilience.Info) {
+   const options: Record<string, any> = {
+     name: model.providerID,
+     ...(model.api.type === "aisdk" ? (model.api.settings ?? {}) : {}),
+     ...model.request.body,
+   }
+   if (model.api.type === "aisdk" && model.api.url) options.baseURL = model.api.url
++  if (ConfigResilience.isEnabledTimeout(resilience.responseTimeoutMs)) options.timeout = resilience.responseTimeoutMs
+ 
+   const customFetch = options.fetch
+   const chunkTimeout = options.chunkTimeout
+@@ -196,6 +199,11 @@ export const locationLayer = Layer.effect(
+       runSDK: (event) => run(sdkHooks, event),
+       runLanguage: (event) => run(languageHooks, event),
+       language: Effect.fn("AISDK.language")(function* (model) {
++        const config = yield* Effect.serviceOption(Config.Service)
++        const resilience =
++          config._tag === "Some"
++            ? ConfigResilience.fromEntries(yield* config.value.entries().pipe(Effect.catch(() => Effect.succeed([]))))
++            : ConfigResilience.DEFAULTS
+         const key = `${model.providerID}/${model.id}/${model.request.variant ?? "default"}`
+         const existing = languages.get(key)
+         if (existing) return existing
+@@ -205,7 +213,7 @@ export const locationLayer = Layer.effect(
+             cause: new Error(`Unsupported api ${model.api.type}`),
+           })
+ 
+-        const options = prepareOptions(model, model.api.package)
++        const options = prepareOptions(model, model.api.package, resilience)
+         const sdkKey = JSON.stringify({
+           providerID: model.providerID,
+           api: model.api,
+diff --git a/packages/core/src/config.ts b/packages/core/src/config.ts
+index c76486968b..1b8a6ada54 100644
+--- a/packages/core/src/config.ts
++++ b/packages/core/src/config.ts
+@@ -9,7 +9,7 @@ import { FSUtil } from "./fs-util"
+ import { Global } from "./global"
+ import { Location } from "./location"
+ import { Policy } from "./policy"
+-import { AbsolutePath } from "./schema"
++import { AbsolutePath, optional } from "./schema"
+ import { ConfigAgent } from "./config/agent"
+ import { ConfigAttachments } from "./config/attachments"
+ import { ConfigCompaction } from "./config/compaction"
+@@ -21,6 +21,7 @@ import { ConfigMCP } from "./config/mcp"
+ import { ConfigPlugin } from "./config/plugin"
+ import { ConfigProvider } from "./config/provider"
+ import { ConfigReference } from "./config/reference"
++import { ConfigResilience } from "./config/resilience"
+ import { ConfigToolOutput } from "./config/tool-output"
+ import { ConfigWatcher } from "./config/watcher"
+ import { ConfigV1 } from "./v1/config/config"
+@@ -84,6 +85,11 @@ export class Info extends Schema.Class<Info>("Config.Info")({
+   mcp: ConfigMCP.Info.pipe(Schema.optional).annotate({
+     description: "MCP server configuration",
+   }),
++  resilience: optional(ConfigResilience.Info)
++    .pipe(Schema.withDecodingDefault(Effect.succeed(ConfigResilience.DEFAULTS)))
++    .annotate({
++      description: "Provider and local tool resilience controls for V2 session execution",
++    }),
+   compaction: ConfigCompaction.Info.pipe(Schema.optional).annotate({
+     description: "Conversation compaction behavior",
+   }),
+diff --git a/packages/core/src/config/resilience.ts b/packages/core/src/config/resilience.ts
+new file mode 100644
+index 0000000000..8368edda59
+--- /dev/null
++++ b/packages/core/src/config/resilience.ts
+@@ -0,0 +1,63 @@
++export * as ConfigResilience from "./resilience"
++
++import { Effect, Schema } from "effect"
++import { ModelV2 } from "../model"
++import { NonNegativeInt } from "../schema"
++
++export class RuntimeMetadata extends Schema.Class<RuntimeMetadata>("ConfigV2.Resilience.RuntimeMetadata")({
++  attempt: NonNegativeInt,
++  selectedModel: Schema.String,
++  actualModel: Schema.String,
++  fallbackUsed: Schema.Boolean,
++}) {}
++
++export type RuntimeMetadataInput = ConstructorParameters<typeof RuntimeMetadata>[0]
++
++export class Info extends Schema.Class<Info>("ConfigV2.Resilience")({
++  responseTimeoutMs: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))).annotate({
++    description: "Provider response timeout in milliseconds. Set to 0 to disable.",
++  }),
++  toolTimeoutMs: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))).annotate({
++    description: "Local session tool execution timeout in milliseconds. Set to 0 to disable.",
++  }),
++  retries: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))).annotate({
++    description: "Additional retry attempts for retryable provider failures before moving to a fallback model.",
++  }),
++  retryDelayMs: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))).annotate({
++    description: "Delay in milliseconds between provider attempts.",
++  }),
++  autoResume: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))).annotate({
++    description: "Allow future runtime recovery flows to resume eligible interrupted sessions automatically.",
++  }),
++  fallbackModels: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))).annotate({
++    description: "Ordered fallback model IDs, preserving provider/model strings exactly as configured.",
++  }),
++}) {}
++
++export const DEFAULTS = new Info({
++  responseTimeoutMs: 0,
++  toolTimeoutMs: 0,
++  retries: 0,
++  retryDelayMs: 0,
++  autoResume: false,
++  fallbackModels: [],
++})
++
++export const fromEntries = (entries: readonly { readonly type: string; readonly info?: { readonly resilience?: Info } }[]) =>
++  entries
++    .filter((entry): entry is { readonly type: "document"; readonly info: { readonly resilience?: Info } } =>
++      entry.type === "document",
++    )
++    .findLast((entry) => entry.info.resilience !== undefined)?.info.resilience ?? DEFAULTS
++
++export const isEnabledTimeout = (value: number) => value > 0
++
++export const modelRef = (input: string) => {
++  const parsed = ModelV2.parse(input)
++  return {
++    id: parsed.modelID,
++    providerID: parsed.providerID,
++  }
++}
++
++export const runtimeMetadata = (input: RuntimeMetadataInput) => new RuntimeMetadata(input)
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+index 72c761e10d..aeb3b4b1d2 100644
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -5,12 +5,14 @@ import {
+   LLMEvent,
+   Message,
+   SystemPart,
++  TransportReason,
+   isContextOverflowFailure,
+   type ProviderErrorEvent,
+ } from "@opencode-ai/llm"
+-import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
++import { Cause, DateTime, Duration, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+ import { AgentV2 } from "../../agent"
+ import { Config } from "../../config"
++import { ConfigResilience } from "../../config/resilience"
+ import { Database } from "../../database/database"
+ import { EventV2 } from "../../event"
+ import { Location } from "../../location"
+@@ -161,10 +163,31 @@ const layer = Layer.effect(
+       }
+     }
+ 
++    class RetryableTurnFailure extends Error {
++      constructor(
++        readonly originalCause: Cause.Cause<RunError>,
++        readonly failure: LLMError,
++      ) {
++        super(failure.message)
++      }
++    }
++
+     const continueAfterCompaction = (step: number) => new TurnTransitionError({ _tag: "ContinueAfterCompaction", step })
+     const continueAfterOverflowCompaction = (step: number) =>
+       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
+ 
++    const modelKey = (model: { readonly provider: string; readonly id: string }) => `${model.provider}/${model.id}`
++
++    const responseTimeoutError = (ms: number) =>
++      new LLMError({
++        module: "SessionRunner",
++        method: "runTurn",
++        reason: new TransportReason({ message: `Response timed out after ${ms} ms`, kind: "timeout" }),
++      })
++
++    const isRetryableLLMFailure = (failure: LLMError) =>
++      failure.retryable || (failure.reason._tag === "Transport" && failure.reason.kind === "timeout")
++
+     const loadSystemContext = (agent: AgentV2.Selection) =>
+       Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
+         concurrency: "unbounded",
+@@ -196,155 +219,221 @@ const layer = Layer.effect(
+       }
+       const system =
+         initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
+-      const model = yield* models.resolve(session)
++      const resilience = ConfigResilience.fromEntries(yield* config.entries())
++      const selectedModel = yield* models.resolve(session)
++      const fallbackModels = yield* Effect.forEach(resilience.fallbackModels, (fallback) =>
++        models.resolve({ ...session, model: ConfigResilience.modelRef(fallback) }),
++      )
+       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
+       const context = entries.map((entry) => entry.message)
+       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
+       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
+       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
+-      const request = LLM.request({
+-        model,
+-        providerOptions: { openai: { promptCacheKey } },
+-        system: [agent.info?.system, system.baseline]
+-          .filter((part): part is string => part !== undefined && part.length > 0)
+-          .map(SystemPart.make),
+-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+-        tools: toolMaterialization?.definitions ?? [],
+-        toolChoice: isLastStep ? "none" : undefined,
+-      })
+-      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
+-        return yield* Effect.die(continueAfterCompaction(currentStep))
+-      const startSnapshot = yield* snapshots.capture()
+-      const publisher = createLLMEventPublisher(events, {
+-        sessionID: session.id,
+-        agent: agent.id,
+-        model: {
+-          id: ModelV2.ID.make(model.id),
+-          providerID: ProviderV2.ID.make(model.provider),
+-          ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }),
+-        },
+-        snapshot: startSnapshot,
+-      })
+-      const withPublication = Semaphore.makeUnsafe(1).withPermit
+-      const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
+-        withPublication(publisher.publish(event, outputPaths))
+-      let overflowFailure: ProviderErrorEvent | undefined
+-      const providerStream = llm.stream(request).pipe(
+-        Stream.runForEach((event) =>
+-          Effect.gen(function* () {
+-            if (overflowFailure || publisher.hasProviderError()) return
+-            if (LLMEvent.is.providerError(event)) {
+-              if (isContextOverflowFailure(event) && !publisher.hasAssistantStarted()) {
+-                overflowFailure = event
++      const selectedModelKey = modelKey(selectedModel)
++      const candidates = [selectedModel, ...fallbackModels]
++      let attempt = 1
++
++      const runAttempt = Effect.fnUntraced(function* (model: typeof selectedModel, fallbackUsed: boolean, canRetry: boolean) {
++        const request = LLM.request({
++          model,
++          providerOptions: { openai: { promptCacheKey } },
++          system: [agent.info?.system, system.baseline]
++            .filter((part): part is string => part !== undefined && part.length > 0)
++            .map(SystemPart.make),
++          messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
++          tools: toolMaterialization?.definitions ?? [],
++          toolChoice: isLastStep ? "none" : undefined,
++        })
++        if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
++          return yield* Effect.die(continueAfterCompaction(currentStep))
++        const startSnapshot = yield* snapshots.capture()
++        const resilienceMetadata = ConfigResilience.runtimeMetadata({
++          attempt,
++          selectedModel: selectedModelKey,
++          actualModel: modelKey(model),
++          fallbackUsed,
++        })
++        const publisher = createLLMEventPublisher(events, {
++          sessionID: session.id,
++          agent: agent.id,
++          model: {
++            id: ModelV2.ID.make(model.id),
++            providerID: ProviderV2.ID.make(model.provider),
++            ...(!fallbackUsed && session.model?.variant !== undefined ? { variant: session.model.variant } : {}),
++          },
++          snapshot: startSnapshot,
++          resilience: resilienceMetadata,
++        })
++        const withPublication = Semaphore.makeUnsafe(1).withPermit
++        const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
++          withPublication(publisher.publish(event, outputPaths))
++        let overflowFailure: ProviderErrorEvent | undefined
++        const runProviderStream = llm.stream(request).pipe(
++          Stream.runForEach((event) =>
++            Effect.gen(function* () {
++              if (overflowFailure || publisher.hasProviderError()) return
++              if (LLMEvent.is.providerError(event)) {
++                if (isContextOverflowFailure(event) && !publisher.hasAssistantStarted()) {
++                  overflowFailure = event
++                  return
++                }
++              }
++              yield* publish(event)
++              if (event.type !== "tool-call" || event.providerExecuted) return
++              if (!toolMaterialization) {
++                yield* withPublication(publisher.failUnsettledTools("Tools are disabled after the maximum agent steps"))
+                 return
+               }
++              needsContinuation = true
++              const assistantMessageID = yield* publisher.assistantMessageID(event.id)
++              const settleTool = toolMaterialization.settle({
++                sessionID: session.id,
++                agent: agent.id,
++                assistantMessageID,
++                call: event,
++              })
++              const boundedTool = ConfigResilience.isEnabledTimeout(resilience.toolTimeoutMs)
++                ? settleTool.pipe(
++                    Effect.timeoutOption(Duration.millis(resilience.toolTimeoutMs)),
++                    Effect.map((settlement): ToolRegistry.Settlement =>
++                      Option.getOrElse(settlement, () => ({
++                        result: {
++                          type: "error" as const,
++                          value: `Tool execution timed out after ${resilience.toolTimeoutMs} ms`,
++                        },
++                      })),
++                    ),
++                  )
++                : settleTool
++              yield* Effect.uninterruptibleMask((restore) =>
++                restore(boundedTool).pipe(
++                  Effect.flatMap((settlement) =>
++                    publish(
++                      LLMEvent.toolResult({
++                        id: event.id,
++                        name: event.name,
++                        result: settlement.result,
++                        output: settlement.output,
++                      }),
++                      settlement.outputPaths ?? [],
++                    ),
++                  ),
++                ),
++              ).pipe(FiberSet.run(toolFibers))
++            }),
++          ),
++          Effect.ensuring(withPublication(publisher.flush())),
++        )
++        const providerStream = ConfigResilience.isEnabledTimeout(resilience.responseTimeoutMs)
++          ? runProviderStream.pipe(
++              Effect.timeoutOrElse({
++                duration: Duration.millis(resilience.responseTimeoutMs),
++                orElse: () => Effect.fail(responseTimeoutError(resilience.responseTimeoutMs)),
++              }),
++            )
++          : runProviderStream
++
++        return yield* Effect.uninterruptibleMask((restore) =>
++          Effect.gen(function* () {
++            const stream = yield* restore(providerStream).pipe(Effect.exit)
++            const failure =
++              stream._tag === "Failure" ? Option.getOrUndefined(Cause.findErrorOption(stream.cause)) : undefined
++            if (
++              recoverOverflow &&
++              !publisher.hasAssistantStarted() &&
++              isContextOverflowFailure(overflowFailure ?? failure) &&
++              (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
++            )
++              return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
++            if (overflowFailure) yield* publish(overflowFailure)
++            const llmFailure = failure instanceof LLMError ? failure : undefined
++            if (
++              llmFailure &&
++              canRetry &&
++              stream._tag === "Failure" &&
++              !publisher.hasAssistantStarted() &&
++              !publisher.hasProviderError() &&
++              isRetryableLLMFailure(llmFailure)
++            )
++              return yield* Effect.die(new RetryableTurnFailure(stream.cause, llmFailure))
++            if (llmFailure && !publisher.hasProviderError()) {
++              yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
++              yield* withPublication(publisher.failAssistant(llmFailure.reason.message))
++            }
++            if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
++            const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
++            if (settled._tag === "Failure" && isUserDeclined(settled.cause)) {
++              yield* FiberSet.clear(toolFibers)
++              yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
++              return yield* Effect.interrupt
++            }
++            if (
++              (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) ||
++              (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
++            ) {
++              yield* FiberSet.clear(toolFibers)
++              yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
++              if (publisher.hasActiveAssistant())
++                yield* withPublication(publisher.failAssistant("Provider turn interrupted"))
+             }
+-            yield* publish(event)
+-            if (event.type !== "tool-call" || event.providerExecuted) return
+-            if (!toolMaterialization) {
+-              yield* withPublication(publisher.failUnsettledTools("Tools are disabled after the maximum agent steps"))
+-              return
++            if (settled._tag === "Failure" && !Cause.hasInterrupts(settled.cause)) {
++              const failure = Cause.squash(settled.cause)
++              const message = failure instanceof Error ? failure.message : String(failure)
++              yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`))
+             }
+-            needsContinuation = true
+-            const assistantMessageID = yield* publisher.assistantMessageID(event.id)
+-            yield* Effect.uninterruptibleMask((restore) =>
+-              restore(
+-                toolMaterialization.settle({
++            const stepSettlement = publisher.stepSettlement()
++            if (stepSettlement && !publisher.hasProviderError()) {
++              const endSnapshot = yield* snapshots.capture()
++              const files =
++                startSnapshot && endSnapshot
++                  ? yield* snapshots
++                      .files({ from: startSnapshot, to: endSnapshot })
++                      .pipe(Effect.catch(() => Effect.succeed(undefined)))
++                  : undefined
++              yield* withPublication(
++                events.publish(SessionEvent.Step.Ended, {
+                   sessionID: session.id,
+-                  agent: agent.id,
+-                  assistantMessageID,
+-                  call: event,
++                  timestamp: yield* DateTime.now,
++                  assistantMessageID: yield* publisher.startAssistant(),
++                  finish: stepSettlement.finish,
++                  cost: 0,
++                  tokens: stepSettlement.tokens,
++                  snapshot: endSnapshot,
++                  files,
++                  resilience: resilienceMetadata,
+                 }),
+-              ).pipe(
+-                Effect.flatMap((settlement) =>
+-                  publish(
+-                    LLMEvent.toolResult({
+-                      id: event.id,
+-                      name: event.name,
+-                      result: settlement.result,
+-                      output: settlement.output,
+-                    }),
+-                    settlement.outputPaths ?? [],
+-                  ),
+-                ),
+-              ),
+-            ).pipe(FiberSet.run(toolFibers))
++              )
++            }
++            if (publisher.hasProviderError())
++              yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
++            if (stream._tag === "Success" && !publisher.hasProviderError())
++              yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
++            if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
++            if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
++              return yield* Effect.failCause(settled.cause)
++            return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
+           }),
+-        ),
+-        Effect.ensuring(withPublication(publisher.flush())),
+-      )
++        )
++      })
+ 
+-      return yield* Effect.uninterruptibleMask((restore) =>
+-        Effect.gen(function* () {
+-          const stream = yield* restore(providerStream).pipe(Effect.exit)
+-          const failure =
+-            stream._tag === "Failure" ? Option.getOrUndefined(Cause.findErrorOption(stream.cause)) : undefined
+-          if (
+-            recoverOverflow &&
+-            !publisher.hasAssistantStarted() &&
+-            isContextOverflowFailure(overflowFailure ?? failure) &&
+-            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
+-          )
+-            return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
+-          if (overflowFailure) yield* publish(overflowFailure)
+-          const llmFailure = failure instanceof LLMError ? failure : undefined
+-          if (llmFailure && !publisher.hasProviderError()) {
+-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
+-            yield* withPublication(publisher.failAssistant(llmFailure.reason.message))
+-          }
+-          if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
+-          const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
+-          if (settled._tag === "Failure" && isUserDeclined(settled.cause)) {
+-            yield* FiberSet.clear(toolFibers)
+-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+-            return yield* Effect.interrupt
++      const attemptsPerModel = resilience.retries + 1
++      for (const [index, model] of candidates.entries()) {
++        for (const retry of Array.from({ length: attemptsPerModel }, (_, retry) => retry)) {
++          const hasNext = retry < attemptsPerModel - 1 || index < candidates.length - 1
++          const exit = yield* runAttempt(model, index > 0, hasNext).pipe(Effect.exit)
++          if (exit._tag === "Success") return exit.value
++          const failure = Cause.squash(exit.cause)
++          if (failure instanceof RetryableTurnFailure && hasNext) {
++            if (resilience.retryDelayMs > 0) yield* Effect.sleep(Duration.millis(resilience.retryDelayMs))
++            attempt++
++            continue
+           }
+-          if (
+-            (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) ||
+-            (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
+-          ) {
+-            yield* FiberSet.clear(toolFibers)
+-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+-            if (publisher.hasActiveAssistant())
+-              yield* withPublication(publisher.failAssistant("Provider turn interrupted"))
+-          }
+-          if (settled._tag === "Failure" && !Cause.hasInterrupts(settled.cause)) {
+-            const failure = Cause.squash(settled.cause)
+-            const message = failure instanceof Error ? failure.message : String(failure)
+-            yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`))
+-          }
+-          const stepSettlement = publisher.stepSettlement()
+-          if (stepSettlement && !publisher.hasProviderError()) {
+-            const endSnapshot = yield* snapshots.capture()
+-            const files =
+-              startSnapshot && endSnapshot
+-                ? yield* snapshots
+-                    .files({ from: startSnapshot, to: endSnapshot })
+-                    .pipe(Effect.catch(() => Effect.succeed(undefined)))
+-                : undefined
+-            yield* withPublication(
+-              events.publish(SessionEvent.Step.Ended, {
+-                sessionID: session.id,
+-                timestamp: yield* DateTime.now,
+-                assistantMessageID: yield* publisher.startAssistant(),
+-                finish: stepSettlement.finish,
+-                cost: 0,
+-                tokens: stepSettlement.tokens,
+-                snapshot: endSnapshot,
+-                files,
+-              }),
+-            )
+-          }
+-          if (publisher.hasProviderError())
+-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+-          if (stream._tag === "Success" && !publisher.hasProviderError())
+-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
+-          if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
+-          if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
+-            return yield* Effect.failCause(settled.cause)
+-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
+-        }),
+-      )
++          return yield* Effect.failCause(
++            failure instanceof RetryableTurnFailure ? failure.originalCause : exit.cause,
++          )
++        }
++      }
++      return yield* Effect.die("No resilience attempt executed")
+     }, Effect.scoped)
+     type RunTurn = (
+       sessionID: SessionSchema.ID,
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+index 33652a618c..196df2b0e6 100644
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -2,6 +2,7 @@ import { ToolOutput, type LLMEvent, type ProviderMetadata, type ToolResultValue,
+ import { DateTime, Effect } from "effect"
+ import { EventV2 } from "../../event"
+ import { ModelV2 } from "../../model"
++import { ConfigResilience } from "../../config/resilience"
+ import { SessionEvent } from "../event"
+ import { SessionMessage } from "../message"
+ import { SessionSchema } from "../schema"
+@@ -11,6 +12,7 @@ type Input = {
+   readonly agent: string
+   readonly model: ModelV2.Ref
+   readonly snapshot?: string
++  readonly resilience?: ConfigResilience.RuntimeMetadata
+ }
+ 
+ const safe = (value: number | undefined) => Math.max(0, Number.isFinite(value) ? (value ?? 0) : 0)
+@@ -80,6 +82,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
+       assistantMessageID,
+       timestamp: yield* timestamp,
+       snapshot: input.snapshot,
++      resilience: input.resilience,
+     })
+     return assistantMessageID
+   })
+@@ -207,6 +210,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input)
+       timestamp: yield* timestamp,
+       assistantMessageID,
+       error: { type: "unknown", message },
++      resilience: input.resilience,
+     })
+   })
+ 
+diff --git a/packages/core/test/resilience-config.test.ts b/packages/core/test/resilience-config.test.ts
+new file mode 100644
+index 0000000000..d2832ad6fe
+--- /dev/null
++++ b/packages/core/test/resilience-config.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect } from "bun:test"
++import { Effect, Layer, Schema } from "effect"
++import { Config } from "@opencode-ai/core/config"
++import { ConfigResilience } from "@opencode-ai/core/config/resilience"
++import { testEffect } from "./lib/effect"
++
++const it = testEffect(Layer.empty)
++
++const decodeInfo = (input: unknown) => Schema.decodeUnknownSync(Config.Info)(input, { errors: "all" })
++
++describe("Config resilience", () => {
++  it.effect("decodes absent resilience config to safe defaults", () =>
++    Effect.sync(() => {
++      expect(decodeInfo({}).resilience).toEqual(ConfigResilience.DEFAULTS)
++    }),
++  )
++
++  it.effect("rejects negative retry and delay controls", () =>
++    Effect.sync(() => {
++      expect(() => decodeInfo({ resilience: { retries: -1 } })).toThrow()
++      expect(() => decodeInfo({ resilience: { retryDelayMs: -1 } })).toThrow()
++    }),
++  )
++
++  it.effect("rejects negative timeout controls while zero stays the disabled value", () =>
++    Effect.sync(() => {
++      expect(() => decodeInfo({ resilience: { responseTimeoutMs: -1 } })).toThrow()
++      expect(() => decodeInfo({ resilience: { toolTimeoutMs: -1 } })).toThrow()
++      expect(decodeInfo({ resilience: { responseTimeoutMs: 0, toolTimeoutMs: 0 } }).resilience).toMatchObject({
++        responseTimeoutMs: 0,
++        toolTimeoutMs: 0,
++      })
++    }),
++  )
++
++  it.effect("preserves fallback model IDs exactly", () =>
++    Effect.sync(() => {
++      expect(
++        decodeInfo({
++          resilience: {
++            fallbackModels: ["openrouter/deepseek/deepseek-chat", "minimax/MiniMax-M3:512k", "oc/big-pickle"],
++          },
++        }).resilience?.fallbackModels,
++      ).toEqual(["openrouter/deepseek/deepseek-chat", "minimax/MiniMax-M3:512k", "oc/big-pickle"])
++    }),
++  )
++})
+diff --git a/packages/core/test/session-resilience.test.ts b/packages/core/test/session-resilience.test.ts
+new file mode 100644
+index 0000000000..875679f6e2
+--- /dev/null
++++ b/packages/core/test/session-resilience.test.ts
+@@ -0,0 +1,471 @@
++import { describe, expect } from "bun:test"
++import {
++  LLMClient,
++  LLMError,
++  LLMEvent,
++  Model,
++  ProviderInternalReason,
++  RateLimitReason,
++  TransportReason,
++  type LLMClientShape,
++  type LLMRequest,
++} from "@opencode-ai/llm"
++import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
++import { Database } from "@opencode-ai/core/database/database"
++import { makeLocationNode } from "@opencode-ai/core/effect/app-node"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { EventV2 } from "@opencode-ai/core/event"
++import { EventTable } from "@opencode-ai/core/event/sql"
++import { PermissionV2 } from "@opencode-ai/core/permission"
++import { Project } from "@opencode-ai/core/project"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { QuestionV2 } from "@opencode-ai/core/question"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionExecution } from "@opencode-ai/core/session/execution"
++import { Prompt } from "@opencode-ai/core/session/prompt"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
++import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator"
++import { SessionRunner } from "@opencode-ai/core/session/runner"
++import * as SessionRunnerLLM from "@opencode-ai/core/session/runner/llm"
++import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
++import { SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionStore } from "@opencode-ai/core/session/store"
++import { Snapshot } from "@opencode-ai/core/snapshot"
++import { AgentV2 } from "@opencode-ai/core/agent"
++import { Config } from "@opencode-ai/core/config"
++import { ConfigResilience } from "@opencode-ai/core/config/resilience"
++import { Location } from "@opencode-ai/core/location"
++import { ToolRegistry } from "@opencode-ai/core/tool/registry"
++import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
++import { Tool } from "@opencode-ai/core/tool/tool"
++import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
++import { SystemContext } from "@opencode-ai/core/system-context"
++import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
++import { SkillGuidance } from "@opencode-ai/core/skill/guidance"
++import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
++import * as TestClock from "effect/testing/TestClock"
++import { asc, eq } from "drizzle-orm"
++import { testEffect } from "./lib/effect"
++
++const requests: LLMRequest[] = []
++let responses: Stream.Stream<LLMEvent, LLMError>[] = []
++let resilience = ConfigResilience.DEFAULTS
++
++const client = Layer.succeed(
++  LLMClient.Service,
++  LLMClient.Service.of({
++    prepare: () => Effect.die("unused"),
++    stream: ((request: LLMRequest) => {
++      requests.push(request)
++      return responses.shift() ?? Stream.empty
++    }) as unknown as LLMClientShape["stream"],
++    generate: () => Effect.die("unused"),
++  }),
++)
++
++const primaryModel = Model.make({ id: "primary", provider: "test", route: OpenAIChat.route })
++const fallbackOneModel = Model.make({ id: "fallback-one", provider: "test", route: OpenAIChat.route })
++const fallbackTwoModel = Model.make({ id: "fallback-two", provider: "test", route: OpenAIChat.route })
++const modelsByRef = new Map([
++  ["test/primary", primaryModel],
++  ["test/fallback-one", fallbackOneModel],
++  ["test/fallback-two", fallbackTwoModel],
++])
++
++const models = SessionRunnerModel.layerWith((session) => {
++  const ref = session.model ? `${session.model.providerID}/${session.model.id}` : "test/primary"
++  return Effect.succeed(modelsByRef.get(ref) ?? primaryModel)
++})
++
++const permission = Layer.succeed(
++  PermissionV2.Service,
++  PermissionV2.Service.of({
++    assert: () => Effect.die("unused"),
++    ask: () => Effect.die("unused"),
++    reply: () => Effect.die("unused"),
++    get: () => Effect.die("unused"),
++    forSession: () => Effect.die("unused"),
++    list: () => Effect.die("unused"),
++  }),
++)
++
++const systemContextKey = SystemContext.Key.make("test/resilience-context")
++const systemContext = Layer.effectDiscard(
++  SystemContextRegistry.Service.pipe(
++    Effect.flatMap((registry) =>
++      registry.register({
++        key: systemContextKey,
++        load: Effect.succeed(
++          SystemContext.make({
++            key: systemContextKey,
++            codec: Schema.toCodecJson(Schema.String),
++            load: Effect.succeed("Resilience context"),
++            baseline: String,
++            update: (_previous, current) => current,
++            removed: () => "Resilience context removed",
++          }),
++        ),
++      }),
++    ),
++  ),
++).pipe(Layer.provideMerge(AppNodeBuilder.build(SystemContextRegistry.node)))
++
++const skillGuidance = Layer.mock(SkillGuidance.Service, { load: () => Effect.succeed(SystemContext.empty) })
++const referenceGuidance = Layer.mock(ReferenceGuidance.Service, { load: () => Effect.succeed(SystemContext.empty) })
++const config = Layer.succeed(
++  Config.Service,
++  Config.Service.of({
++    entries: () =>
++      Effect.succeed([
++        new Config.Document({
++          type: "document",
++          info: new Config.Info({ resilience }),
++        }),
++      ]),
++  }),
++)
++
++const slowTool = Layer.effectDiscard(
++  ToolRegistry.Service.use((registry) =>
++    registry.register({
++      slow: Tool.make({
++        description: "Wait before returning",
++        input: Schema.Struct({ text: Schema.String }),
++        output: Schema.Struct({ text: Schema.String }),
++        toModelOutput: ({ output }) => [{ type: "text", text: output.text }],
++        execute: ({ text }) => Effect.sleep(Duration.millis(1_000)).pipe(Effect.as({ text })),
++      }),
++    }),
++  ),
++)
++
++const slowToolNode = makeLocationNode({
++  name: "test/session-resilience-tools",
++  layer: slowTool,
++  deps: [ToolRegistry.node],
++})
++
++const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
++  [Snapshot.node, Snapshot.noopLayer],
++  [LayerNodePlatform.llmClient, client],
++  [SessionRunnerModel.node, models],
++  [SystemContextRegistry.node, systemContext],
++  [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
++  [SkillGuidance.node, skillGuidance],
++  [ReferenceGuidance.node, referenceGuidance],
++  [PermissionV2.node, permission],
++  [Config.node, config],
++])
++
++const execution = Layer.effect(
++  SessionExecution.Service,
++  Effect.gen(function* () {
++    const sessionRunner = yield* SessionRunner.Service
++    const coordinator = yield* SessionRunCoordinator.make<SessionV2.ID, SessionRunner.RunError>({
++      drain: (sessionID, force) => sessionRunner.run({ sessionID, force }),
++    })
++    return SessionExecution.Service.of({
++      active: coordinator.active,
++      resume: coordinator.run,
++      wake: coordinator.wake,
++      interrupt: coordinator.interrupt,
++    })
++  }),
++).pipe(Layer.provide(runnerLayer))
++
++const it = testEffect(
++  AppNodeBuilder.build(
++    LayerNode.group([
++      Database.node,
++      EventV2.node,
++      QuestionV2.node,
++      SessionProjector.node,
++      SessionStore.node,
++      ApplicationTools.node,
++      AgentV2.node,
++      ToolOutputStore.node,
++      ToolRegistry.node,
++      ToolRegistry.toolsNode,
++      slowToolNode,
++      SessionRunnerModel.node,
++      SystemContextRegistry.node,
++      SkillGuidance.node,
++      ReferenceGuidance.node,
++      Config.node,
++      Snapshot.node,
++      SessionRunnerLLM.node,
++      SessionExecution.node,
++      SessionV2.node,
++    ]),
++    [
++      [LayerNodePlatform.llmClient, client],
++      [PermissionV2.node, permission],
++      [SessionRunnerModel.node, models],
++      [SystemContextRegistry.node, systemContext],
++      [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
++      [SkillGuidance.node, skillGuidance],
++      [ReferenceGuidance.node, referenceGuidance],
++      [Snapshot.node, Snapshot.noopLayer],
++      [SessionExecution.node, execution],
++      [Config.node, config],
++    ],
++  ),
++)
++
++const sessionID = SessionV2.ID.make("ses_resilience_test")
++
++const setup = Effect.gen(function* () {
++  requests.length = 0
++  responses = []
++  resilience = ConfigResilience.DEFAULTS
++  const { db } = yield* Database.Service
++  yield* db
++    .insert(ProjectTable)
++    .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
++    .onConflictDoNothing()
++    .run()
++    .pipe(Effect.orDie)
++  yield* db
++    .insert(SessionTable)
++    .values({
++      id: sessionID,
++      project_id: Project.ID.global,
++      slug: "resilience",
++      directory: "/project",
++      title: "resilience",
++      version: "test",
++      model: {
++        id: ModelV2.ID.make("primary"),
++        providerID: ProviderV2.ID.make("test"),
++      },
++    })
++    .onConflictDoNothing()
++    .run()
++    .pipe(Effect.orDie)
++})
++
++const retryable = (message: string) =>
++  new LLMError({
++    module: "test",
++    method: "stream",
++    reason: new RateLimitReason({ message }),
++  })
++
++const internal = (message: string) =>
++  new LLMError({
++    module: "test",
++    method: "stream",
++    reason: new ProviderInternalReason({ message, status: 503 }),
++  })
++
++const nonRetryable = (message: string) =>
++  new LLMError({
++    module: "test",
++    method: "stream",
++    reason: new TransportReason({ message }),
++  })
++
++const textResponse = (text: string) =>
++  Stream.fromIterable([
++    LLMEvent.stepStart({ index: 0 }),
++    LLMEvent.textStart({ id: "text" }),
++    LLMEvent.textDelta({ id: "text", text }),
++    LLMEvent.textEnd({ id: "text" }),
++    LLMEvent.stepFinish({ index: 0, reason: "stop" }),
++    LLMEvent.finish({ reason: "stop" }),
++  ])
++
++const toolResponse = Stream.fromIterable([
++  LLMEvent.stepStart({ index: 0 }),
++  LLMEvent.toolCall({ id: "call-slow", name: "slow", input: { text: "late" } }),
++  LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++  LLMEvent.finish({ reason: "tool-calls" }),
++])
++
++const stepEvents = Database.Service.use(({ db }) =>
++  db
++    .select({ type: EventTable.type, data: EventTable.data })
++    .from(EventTable)
++    .where(eq(EventTable.aggregate_id, sessionID))
++    .orderBy(asc(EventTable.seq))
++    .all()
++    .pipe(Effect.orDie),
++)
++
++describe("Session resilience", () => {
++  it.effect("retries retryable provider failures within the configured bound", () =>
++    Effect.gen(function* () {
++      yield* setup
++      resilience = new ConfigResilience.Info({ ...ConfigResilience.DEFAULTS, retries: 2, retryDelayMs: 250 })
++      responses = [Stream.fail(retryable("busy")), Stream.fail(retryable("busy again")), textResponse("ok")]
++      const session = yield* SessionV2.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Retry" }), resume: false })
++
++      const fiber = yield* session.resume(sessionID).pipe(Effect.forkChild)
++      yield* Effect.yieldNow
++      expect(requests.map((request) => String(request.model.id))).toEqual(["primary"])
++      yield* TestClock.adjust(Duration.millis(249))
++      yield* Effect.yieldNow
++      expect(requests.map((request) => String(request.model.id))).toEqual(["primary"])
++      yield* TestClock.adjust(Duration.millis(1))
++      yield* Effect.yieldNow
++      expect(requests.map((request) => String(request.model.id))).toEqual(["primary", "primary"])
++      yield* TestClock.adjust(Duration.millis(250))
++      yield* Fiber.join(fiber)
++
++      expect(requests.map((request) => String(request.model.id))).toEqual(["primary", "primary", "primary"])
++      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
++        type: "assistant",
++        content: [{ type: "text", text: "ok" }],
++      })
++      expect(
++        (yield* stepEvents)
++          .flatMap((event) => ((event.data as { resilience?: unknown }).resilience ? [event.data] : []))
++          .at(0),
++      ).toMatchObject({
++        resilience: { attempt: 3, selectedModel: "test/primary", actualModel: "test/primary", fallbackUsed: false },
++      })
++    }),
++  )
++
++  it.effect("selects fallback models in configured order after retryable failures", () =>
++    Effect.gen(function* () {
++      yield* setup
++      resilience = new ConfigResilience.Info({
++        ...ConfigResilience.DEFAULTS,
++        retries: 0,
++        fallbackModels: ["test/fallback-one", "test/fallback-two"],
++      })
++      responses = [Stream.fail(internal("primary down")), Stream.fail(internal("fallback down")), textResponse("ok")]
++      const session = yield* SessionV2.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fallback" }), resume: false })
++
++      yield* session.resume(sessionID)
++
++      expect(requests.map((request) => `${request.model.provider}/${String(request.model.id)}`)).toEqual([
++        "test/primary",
++        "test/fallback-one",
++        "test/fallback-two",
++      ])
++      expect(
++        (yield* stepEvents)
++          .flatMap((event) => ((event.data as { resilience?: unknown }).resilience ? [event.data] : []))
++          .at(-1),
++      ).toMatchObject({
++        resilience: {
++          attempt: 3,
++          selectedModel: "test/primary",
++          actualModel: "test/fallback-two",
++          fallbackUsed: true,
++        },
++      })
++    }),
++  )
++
++  it.effect("classifies response timeouts without replacing MCP timeout fields", () =>
++    Effect.gen(function* () {
++      yield* setup
++      resilience = new ConfigResilience.Info({
++        ...ConfigResilience.DEFAULTS,
++        responseTimeoutMs: 10,
++      })
++      responses = [Stream.never]
++      const session = yield* SessionV2.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Timeout" }), resume: false })
++
++      const fiber = yield* session.resume(sessionID).pipe(Effect.flip, Effect.forkChild)
++      yield* Effect.yieldNow
++      yield* TestClock.adjust(Duration.millis(10))
++      const failure = yield* Fiber.join(fiber)
++
++      expect(failure).toBeInstanceOf(LLMError)
++      expect(failure.message).toContain("Response timed out after 10 ms")
++      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
++        type: "assistant",
++        finish: "error",
++        error: { type: "unknown", message: "Response timed out after 10 ms" },
++      })
++      expect(
++        Schema.decodeUnknownSync(Config.Info)({ mcp: { timeout: { startup: 5_000, request: 60_000 } } }).mcp,
++      ).toMatchObject({ timeout: { startup: 5_000, request: 60_000 } })
++    }),
++  )
++
++  it.effect("does not retry a provider failure after any assistant output is committed", () =>
++    Effect.gen(function* () {
++      yield* setup
++      resilience = new ConfigResilience.Info({
++        ...ConfigResilience.DEFAULTS,
++        retries: 2,
++        fallbackModels: ["test/fallback-one"],
++      })
++      responses = [
++        Stream.concat(
++          Stream.fromIterable([
++            LLMEvent.stepStart({ index: 0 }),
++            LLMEvent.textStart({ id: "text" }),
++            LLMEvent.textDelta({ id: "text", text: "partial" }),
++          ]),
++          Stream.fail(retryable("after partial")),
++        ),
++      ]
++      const session = yield* SessionV2.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Partial" }), resume: false })
++
++      const failure = yield* session.resume(sessionID).pipe(Effect.flip)
++
++      expect(failure).toBeInstanceOf(LLMError)
++      expect(requests.map((request) => String(request.model.id))).toEqual(["primary"])
++      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({
++        type: "assistant",
++        finish: "error",
++        content: [{ type: "text", text: "partial" }],
++      })
++    }),
++  )
++
++  it.effect("settles local tools with the configured tool execution ceiling", () =>
++    Effect.gen(function* () {
++      yield* setup
++      resilience = new ConfigResilience.Info({
++        ...ConfigResilience.DEFAULTS,
++        toolTimeoutMs: 10,
++      })
++      responses = [toolResponse, Stream.empty]
++      const session = yield* SessionV2.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Use slow tool" }), resume: false })
++
++      const fiber = yield* session.resume(sessionID).pipe(Effect.forkChild)
++      yield* Effect.yieldNow
++      yield* TestClock.adjust(Duration.millis(10))
++      yield* Fiber.join(fiber)
++
++      expect((yield* session.context(sessionID)).at(1)).toMatchObject({
++        type: "assistant",
++        content: [{ type: "tool", id: "call-slow", state: { status: "error" } }],
++      })
++    }),
++  )
++
++  it.effect("does not retry non-retryable provider failures", () =>
++    Effect.gen(function* () {
++      yield* setup
++      resilience = new ConfigResilience.Info({ ...ConfigResilience.DEFAULTS, retries: 2 })
++      responses = [Stream.fail(nonRetryable("not retryable"))]
++      const session = yield* SessionV2.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "No retry" }), resume: false })
++
++      const exit = yield* session.resume(sessionID).pipe(Effect.exit)
++
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(LLMError)
++      expect(requests).toHaveLength(1)
++    }),
++  )
++})
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+index 3a559c3e38..0f9ba3de7c 100644
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -51,6 +51,14 @@ const stepSettlementOptions = {
+ export const UnknownError = SessionMessage.UnknownError
+ export type UnknownError = SessionMessage.UnknownError
+ 
++export const ResilienceRuntimeMetadata = Schema.Struct({
++  attempt: NonNegativeInt,
++  selectedModel: Schema.String,
++  actualModel: Schema.String,
++  fallbackUsed: Schema.Boolean,
++}).annotate({ identifier: "session.next.resilience.runtime.metadata" })
++export type ResilienceRuntimeMetadata = typeof ResilienceRuntimeMetadata.Type
++
+ export const AgentSwitched = Event.define({
+   type: "session.next.agent.switched",
+   ...options,
+@@ -155,6 +163,7 @@ export namespace Step {
+       agent: Schema.String,
+       model: Model.Ref,
+       snapshot: Schema.String.pipe(optional),
++      resilience: ResilienceRuntimeMetadata.pipe(optional),
+     },
+   })
+   export type Started = typeof Started.Type
+@@ -178,6 +187,7 @@ export namespace Step {
+       }),
+       snapshot: Schema.String.pipe(optional),
+       files: Schema.Array(RelativePath).pipe(optional),
++      resilience: ResilienceRuntimeMetadata.pipe(optional),
+     },
+   })
+   export type Ended = typeof Ended.Type
+@@ -189,6 +199,7 @@ export namespace Step {
+       ...Base,
+       assistantMessageID: SessionMessage.ID,
+       error: UnknownError,
++      resilience: ResilienceRuntimeMetadata.pipe(optional),
+     },
+   })
+   export type Failed = typeof Failed.Type
+-- 
+2.34.1
+
