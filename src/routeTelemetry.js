@@ -64,6 +64,13 @@ export function installRouteTelemetry() {
     response.setHeader("content-type", "application/json")
     response.end(JSON.stringify(latest))
   })
+  server.on("error", (error) => {
+    if (error?.code === "EADDRINUSE") {
+      server = null
+      return
+    }
+    throw error
+  })
   server.listen(TELEMETRY_PORT, "127.0.0.1")
 }
 
