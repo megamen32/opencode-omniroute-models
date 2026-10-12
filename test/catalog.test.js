@@ -7,6 +7,7 @@ import {
   normalizeCatalogModel,
   resolveSelectorOptions,
   toOpenCodeModelMetadata,
+  toOpenCodeConfigModels,
 } from "../src/catalog.js"
 import { createServer } from "node:http"
 
@@ -167,4 +168,28 @@ test("refreshes the live catalog after the configured TTL", async () => {
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
+})
+
+// Native1.18.32 requires both limit.context and limit.output when optional limit is present.
+test("omits partial native config limits while output is unknown rather than fabricating it", () => {
+  const metadata = toOpenCodeModelMetadata({ id: "kiro/deepseek-3.2", context_length: 128_000 })
+  assert.equal("limit" in metadata, false)
+})
+
+// OpenCode1.18.32 native ConfigModel makes limit optional but requires both context/output when present.
+test("config projection omits incomplete limits without inventing values or changing model identities/options", () => {
+  const models = {
+    "kiro/deepseek-3.2": { id: "kiro/deepseek-3.2", context_length: 128_000, limit: { context: 128_000 }, options: { retained: true } },
+    "alias": { id: "canonical", limit: { input: 512_000, context: 512_000 } },
+    "known": { id: "known", limit: { context: 128_000, output: 8_192, input: 120_000 }, options: { retained: true } },
+  }
+  const result = toOpenCodeConfigModels(models)
+  assert.deepEqual(Object.keys(result), Object.keys(models))
+  assert.equal("limit" in result["kiro/deepseek-3.2"], false)
+  assert.equal("limit" in result.alias, false)
+  assert.equal(result["kiro/deepseek-3.2"].context_length, 128_000)
+  assert.equal(result["kiro/deepseek-3.2"].id, "kiro/deepseek-3.2")
+  assert.deepEqual(result["kiro/deepseek-3.2"].options, { retained: true })
+  assert.deepEqual(result.known, models.known)
+  assert.deepEqual(models.alias.limit, { input: 512_000, context: 512_000 })
 })

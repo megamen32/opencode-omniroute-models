@@ -10,6 +10,7 @@ import {
   normalizeCatalogModel,
   resolveSelectorOptions,
   toOpenCodeModelMetadata,
+  toOpenCodeConfigModels,
 } from "./src/catalog.js"
 import { disposeRouteTelemetry, installRouteTelemetry, telemetryHeaders, wrapProviderFetch } from "./src/routeTelemetry.js"
 import {
@@ -138,12 +139,12 @@ export default async (input, options) => {
           const eb = await fetchEffortBases(baseURL, apiKey)
           const selectorOptions = resolveSelectorOptions(provider.options, pluginSelectorOptions)
           const guardEvaluation = synchronizeUsageGuard(provider.options, pluginUsageGuardOptions)
-          provider.models = processModels(
+          provider.models = toOpenCodeConfigModels(processModels(
             mergeLiveCatalogModels(provider.models, catalogModels, selectorOptions),
             eb,
             selectorOptions,
             guardEvaluation,
-          )
+          ))
         }
       }
     },

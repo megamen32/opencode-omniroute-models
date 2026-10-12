@@ -84,7 +84,7 @@ export function toOpenCodeModelMetadata(model) {
   if (input !== undefined) limit.input = input
   if (output !== undefined) limit.output = output
   return {
-    ...(Object.keys(limit).length > 0 ? { limit } : {}),
+    ...(context !== undefined && output !== undefined ? { limit } : {}),
     modalities: {
       input: normalized.input_modalities,
       output: normalized.output_modalities,
@@ -209,4 +209,14 @@ function positiveNumber(...values) {
     if (Number.isFinite(number) && number > 0) return number
   }
   return undefined
+}
+
+/** Native config response requires context and output together. Raw catalog facts remain untouched. */
+export function toOpenCodeConfigModels(models) {
+  return Object.fromEntries(Object.entries(models).map(([id, model]) => {
+    const limit = model.limit
+    if (limit === undefined || (Number.isFinite(limit?.context) && Number.isFinite(limit?.output))) return [id, model]
+    const { limit: _incomplete, ...rest } = model
+    return [id, rest]
+  }))
 }
