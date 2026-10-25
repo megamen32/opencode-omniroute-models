@@ -7,6 +7,11 @@ It refreshes the catalog every five minutes by default, keeps model metadata
 usable by OpenCode, and hides `auto/*` and `best/*` routing selectors by
 default. It does not replace or hard-code the OmniRoute model list.
 
+OpenCode v2 uses its provider catalog transform to refresh context metadata
+from OmniRoute. Input context (`context_length` / `max_input_tokens`) is kept
+independent from the model's output-token limit. The plugin also retains its
+OpenCode v1 server hook.
+
 ## Roomhacker custom features
 
 - **Exact live IDs:** the catalog keeps provider/model IDs as selectable IDs,

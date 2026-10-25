@@ -97,7 +97,7 @@ function toOpenCodeCatalogModel(model) {
 let effortBasesCache = null
 const configuredComboModelIds = new Set()
 
-export default async (input, options) => {
+async function createLegacyPlugin(input, options) {
   installRouteTelemetry()
   const base = await basePlugin(input, options)
   const pluginSelectorOptions = resolveSelectorOptions({}, options, {
@@ -166,6 +166,70 @@ export default async (input, options) => {
       },
     },
   }
+}
+
+/** OpenCode v2 model-catalog adapter. */
+async function setupV2Catalog(ctx) {
+  const providerID = OMNIROUTE_PROVIDER_ID
+  let catalogModels = []
+
+  const refreshCatalog = async () => {
+    try {
+      const active = await ctx.integration.connection.active(providerID)
+      const credential = active ? await ctx.integration.connection.resolve(active) : undefined
+      const apiKey = typeof credential === "string" ? credential : credential?.key
+      const providerResult = await ctx.provider.get({ providerID })
+      const provider = providerResult?.data ?? providerResult
+      const baseURL = provider?.settings?.baseURL
+      if (!baseURL || !apiKey) return false
+
+      const response = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!response.ok) return false
+      const payload = await response.json()
+      const models = filterCatalogModels(payload?.data)
+      if (models.length === 0) return false
+      catalogModels = models
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const applyCatalog = async () => {
+    await ctx.provider.transform((editor) => {
+      const configured = editor.get(providerID)?.models
+      for (const model of catalogModels) {
+        const context = positiveNumber(
+          model.context_length,
+          model.contextWindow,
+          model.max_input_tokens,
+          model.limit?.context,
+        )
+        if (!context || !configured?.has(model.id)) continue
+        editor.models.update(providerID, model.id, (draft) => {
+          draft.limit = { ...draft.limit, context }
+        })
+      }
+    })
+  }
+
+  await refreshCatalog()
+  await applyCatalog()
+
+  const timer = setInterval(async () => {
+    if (await refreshCatalog()) await ctx.provider.reload()
+  }, CATALOG_TTL_MS)
+  timer.unref?.()
+  return () => clearInterval(timer)
+}
+
+export default {
+  id: "opencode-omniroute-models",
+  setup: setupV2Catalog,
+  server: createLegacyPlugin,
 }
 
 function rememberConfiguredComboModels(config) {
