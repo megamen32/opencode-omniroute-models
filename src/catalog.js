@@ -211,12 +211,7 @@ function positiveNumber(...values) {
   return undefined
 }
 
-/** Native config response requires context and output together. Raw catalog facts remain untouched. */
+/** Preserve independently advertised input and output limits in OpenCode's model config. */
 export function toOpenCodeConfigModels(models) {
-  return Object.fromEntries(Object.entries(models).map(([id, model]) => {
-    const limit = model.limit
-    if (limit === undefined || (Number.isFinite(limit?.context) && Number.isFinite(limit?.output))) return [id, model]
-    const { limit: _incomplete, ...rest } = model
-    return [id, rest]
-  }))
+  return Object.fromEntries(Object.entries(models))
 }
